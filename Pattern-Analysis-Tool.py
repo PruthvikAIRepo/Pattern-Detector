@@ -53,7 +53,6 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.layout = QVBoxLayout(self.central_widget)
 
         self.templates = []
-        self.matched_templates = {}
         self.neglect_count = {}
         self.settings = QSettings('YourCompany', 'ScreenCapturePatternDetector')
         self.max_templates = 10
@@ -271,7 +270,6 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.select_area_button.setEnabled(True)
 
             # Clear any ongoing detections or matches
-            self.matched_templates.clear()
             self.neglect_count.clear()
 
             # Reset capture inputs
@@ -321,13 +319,6 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.settings.setValue('cooldown_timer', self.cooldown_timer_input.value())
         QMessageBox.information(self, "Settings Saved", "Your settings have been saved.")
 
-    def load_settings(self):
-        self.neglect_matched.setChecked(self.settings.value('neglect_matched', True, type=bool))
-        self.capture_minutes_input.setValue(self.settings.value('capture_minutes', 0, type=int))
-        self.capture_seconds_input.setValue(self.settings.value('capture_seconds', 0, type=int))
-        self.selected_region = self.settings.value('selected_region', None)
-        self.cooldown_timer_input.setValue(self.settings.value('cooldown_timer', 30, type=int))
-
     @pyqtSlot()
     def update_cooldown_label(self):
         if self.cooldown_timer.isActive() and self.cooldown_end_time:
@@ -344,10 +335,6 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.in_cooldown = False
         self.cooldown_timer_label.setText("No active cooldown")
         self.log_message("Cooldown period finished. Ready for next hotkey.")
-
-    # In any method that might be called from a non-main thread
-    def some_method_that_starts_cooldown(self):
-        QMetaObject.invokeMethod(self, "start_cooldown_timer", Qt.QueuedConnection)
 
     def set_progress_bar_value(self, value):
         self.progress_bar.setValue(value)
@@ -487,20 +474,6 @@ class ScreenCapturePatternDetector(QMainWindow):
             status_text = f"Capture started. Next capture in {seconds} seconds"
         self.status_label.setText(status_text)
 
-    def stop_capture(self):
-        self.capture_in_progress = False
-        self.timer.stop()
-        self.progress_timer.stop()
-        if hasattr(self, 'pause_timer'):
-            self.pause_timer.stop()
-        self.start_capture_button.setEnabled(True)
-        self.pause_capture_button.setEnabled(False)
-        self.select_area_button.setEnabled(True)
-        self.progress_bar.setValue(0)
-        self.status_label.setText("Capture stopped")
-        if hasattr(self, 'hotkey_timer'):
-            self.hotkey_timer.stop()
-
     def update_progress_bar(self):
         if self.capture_in_progress:
             total_seconds = self.capture_minutes_input.value() * 60 + self.capture_seconds_input.value()
@@ -559,23 +532,6 @@ class ScreenCapturePatternDetector(QMainWindow):
             print(f"Warning: SSIM calculation failed for images of shape {img1.shape} and {img2.shape}")
             return 0
 
-    @pyqtSlot()
-    def start_hotkey_timer(self):
-        gap_seconds = self.hotkey_gap_input.value()
-        self.hotkey_timer.start(gap_seconds * 1000)
-
-    def queue_hotkey(self, hotkey):
-        self.log_message(f"Hotkey detected: {hotkey}")
-        if not self.hotkey_timer.isActive():
-            self.log_message(f"Executing hotkey immediately: {hotkey}")
-            self.perform_hotkey(hotkey)
-            gap_seconds = self.hotkey_gap_input.value()
-            self.log_message(f"Starting hotkey timer for {gap_seconds} seconds")
-            QMetaObject.invokeMethod(self, "start_hotkey_timer", Qt.QueuedConnection)
-        else:
-            self.log_message(f"Queueing hotkey: {hotkey}")
-            self.hotkey_queue.append(hotkey)
-
     def perform_hotkey(self, hotkey):
         try:
             pyautogui.hotkey(*hotkey.split('+'))
@@ -583,32 +539,6 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.start_cooldown_timer()
         except Exception as e:
             self.log_message(f"Error performing hotkey {hotkey}: {str(e)}")
-
-    @pyqtSlot(str)
-    def _perform_hotkey(self, hotkey):
-        try:
-            pyautogui.hotkey(*hotkey.split('+'))
-            self.log_message(f"Hotkey performed: {hotkey}")
-        except Exception as e:
-            self.log_message(f"Error performing hotkey {hotkey}: {str(e)}")
-
-    @pyqtSlot()
-    def process_queued_hotkeys(self):
-        self.log_message("Timer expired. Processing queued hotkeys.")
-        execution_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.log_message(f"Execution time: {execution_time}")
-        
-        if not self.hotkey_queue:
-            self.log_message("No hotkeys in queue.")
-        else:
-            self.log_message(f"Number of hotkeys in queue: {len(self.hotkey_queue)}")
-        
-        while self.hotkey_queue:
-            hotkey = self.hotkey_queue.pop(0)
-            self.log_message(f"Executing queued hotkey: {hotkey}")
-            self.perform_hotkey(hotkey)
-        
-        self.log_message("Hotkey queue processed and timer stopped")
 
     def detect_pattern(self, screenshot_path):
         neglect_matched = self.neglect_matched.isChecked()
