@@ -1371,21 +1371,13 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.display_image(self.last_displayed_image)
 
     def closeEvent(self, event):
-        if self.really_quit:
-            if hasattr(self, 'cooldown_update_timer'):
-                self.cooldown_update_timer.stop()
-            if hasattr(self, 'schedule_timer'):
-                self.schedule_timer.stop()
-            if hasattr(self, 'tray_icon'):
-                self.tray_icon.hide()
-            event.accept()
-        else:
-            event.ignore()
-            self.hide()
-            self.tray_icon.showMessage(
-                APP_NAME,
-                "Running in the background. Right-click tray icon to quit.",
-                QSystemTrayIcon.Information, 2000)
+        if hasattr(self, 'cooldown_update_timer'):
+            self.cooldown_update_timer.stop()
+        if hasattr(self, 'schedule_timer'):
+            self.schedule_timer.stop()
+        if hasattr(self, 'tray_icon'):
+            self.tray_icon.hide()
+        event.accept()
 
 
 class AreaSelector(QWidget):
