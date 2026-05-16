@@ -685,7 +685,8 @@ class ScreenCapturePatternDetector(QMainWindow):
                     continue
                 pattern_rgb = cv2.cvtColor(pattern_img, cv2.COLOR_BGR2RGB)
 
-                for scale in np.linspace(0.5, 2.0, 20):
+                scales = sorted(set(np.linspace(0.5, 2.0, 20).tolist() + [1.0]))
+                for scale in scales:
                     resized = cv2.resize(pattern_rgb, None, fx=scale, fy=scale)
 
                     if (resized.shape[0] > stock_chart_rgb.shape[0]
