@@ -636,9 +636,9 @@ class ScreenCapturePatternDetector(QMainWindow):
 
             self.update_status.emit(status_msg)
 
-            # Visualization for areas that had matches
-            for i, (patterns, screenshot) in area_matched_data.items():
-                self.process_area_visualization(patterns, screenshot, i)
+            # Combined visualization for all active areas
+            if area_matched_data:
+                self.process_combined_visualization(area_matched_data, area_results)
 
         except Exception as e:
             self.log_message(f"Error during capture and detect: {str(e)}")
@@ -685,6 +685,12 @@ class ScreenCapturePatternDetector(QMainWindow):
                     continue
                 pattern_rgb = cv2.cvtColor(pattern_img, cv2.COLOR_BGR2RGB)
 
+                # Find the single best match across all scales for this template
+                best_match_score = -1
+                best_match_loc = None
+                best_match_scale = None
+                best_match_shape = None
+
                 scales = sorted(set(np.linspace(0.5, 2.0, 20).tolist() + [1.0]))
                 for scale in scales:
                     resized = cv2.resize(pattern_rgb, None, fx=scale, fy=scale)
@@ -695,32 +701,44 @@ class ScreenCapturePatternDetector(QMainWindow):
 
                     result = cv2.matchTemplate(
                         stock_chart_rgb, resized, cv2.TM_CCOEFF_NORMED)
-                    locations = np.where(result >= template['similarity'])
+                    _, max_val, _, max_loc = cv2.minMaxLoc(result)
 
-                    for pt in zip(*locations[::-1]):
-                        x, y = pt
-                        h, w = resized.shape[:2]
-                        roi = stock_chart_rgb[y:y + h, x:x + w]
+                    if max_val > best_match_score:
+                        best_match_score = max_val
+                        best_match_loc = max_loc
+                        best_match_scale = scale
+                        best_match_shape = resized.shape
 
-                        ssim_value = self.calculate_ssim(roi, resized)
+                # Only compute expensive SSIM + histogram for the single best match
+                if (best_match_score >= template['similarity']
+                        and best_match_loc is not None):
+                    x, y = best_match_loc
+                    h, w = best_match_shape[:2]
+                    roi = stock_chart_rgb[y:y + h, x:x + w]
 
-                        roi_hist = cv2.calcHist(
-                            [roi], [0, 1, 2], None,
-                            [8, 8, 8], [0, 256, 0, 256, 0, 256])
-                        tmpl_hist = cv2.calcHist(
-                            [resized], [0, 1, 2], None,
-                            [8, 8, 8], [0, 256, 0, 256, 0, 256])
-                        hist_sim = cv2.compareHist(
-                            roi_hist, tmpl_hist, cv2.HISTCMP_CORREL)
+                    resized_best = cv2.resize(pattern_rgb, None,
+                                              fx=best_match_scale, fy=best_match_scale)
 
-                        combined = (0.4 * result[y, x]
-                                    + 0.4 * ssim_value
-                                    + 0.2 * hist_sim)
+                    ssim_value = self.calculate_ssim(roi, resized_best)
 
-                        all_matched_patterns.append(
-                            (pt, resized.shape, combined, template_path, scale))
+                    roi_hist = cv2.calcHist(
+                        [roi], [0, 1, 2], None,
+                        [8, 8, 8], [0, 256, 0, 256, 0, 256])
+                    tmpl_hist = cv2.calcHist(
+                        [resized_best], [0, 1, 2], None,
+                        [8, 8, 8], [0, 256, 0, 256, 0, 256])
+                    hist_sim = cv2.compareHist(
+                        roi_hist, tmpl_hist, cv2.HISTCMP_CORREL)
 
-                        neglect_count[template_path] = 1
+                    combined = (0.4 * best_match_score
+                                + 0.4 * ssim_value
+                                + 0.2 * hist_sim)
+
+                    all_matched_patterns.append(
+                        (best_match_loc, best_match_shape, combined,
+                         template_path, best_match_scale))
+
+                    neglect_count[template_path] = 1
 
             return (len(all_matched_patterns) > 0, all_matched_patterns)
 
@@ -737,38 +755,54 @@ class ScreenCapturePatternDetector(QMainWindow):
         except ValueError:
             return 0
 
-    def process_area_visualization(self, matched_patterns, screenshot_path, area_index):
-        """Draw detection rectangles on the screenshot for visualization."""
+    def process_combined_visualization(self, area_matched_data, area_results):
+        """Draw detection results for all areas in a single combined figure."""
         try:
-            stock_chart = cv2.imread(screenshot_path)
-            stock_chart_rgb = cv2.cvtColor(stock_chart, cv2.COLOR_BGR2RGB)
+            active_areas = sorted(area_matched_data.keys())
+            num_areas = max(len(area_results), 1)
 
-            matched_patterns.sort(key=lambda x: x[2], reverse=True)
+            fig, axes = plt.subplots(1, num_areas, figsize=(6 * num_areas, 5))
+            if num_areas == 1:
+                axes = [axes]
 
-            fig, ax = plt.subplots(figsize=(10, 5))
-            ax.imshow(stock_chart_rgb)
+            area_indices = sorted(area_results.keys())
+            for ax_idx, area_idx in enumerate(area_indices):
+                ax = axes[ax_idx]
+                matched = area_results[area_idx]
 
-            for i, pattern in enumerate(matched_patterns):
-                x, y = pattern[0]
-                h, w = pattern[1][:2]
-                similarity_score = pattern[2]
-                template_path = pattern[3]
-                scale = pattern[4]
+                if area_idx in area_matched_data:
+                    patterns, screenshot_path = area_matched_data[area_idx]
+                    img = cv2.imread(screenshot_path)
+                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    ax.imshow(img_rgb)
 
-                rect = plt.Rectangle(
-                    (x, y), w, h, edgecolor='r', facecolor='none', linewidth=2)
-                ax.add_patch(rect)
-                plt.text(x, y,
-                         f'{i + 1}. Sim: {similarity_score:.4f}\n'
-                         f'Scale: {scale:.2f}\n'
-                         f'{os.path.basename(template_path)}',
-                         color='red', fontsize=8)
+                    patterns.sort(key=lambda x: x[2], reverse=True)
+                    for i, pattern in enumerate(patterns):
+                        x, y = pattern[0]
+                        h, w = pattern[1][:2]
+                        score = pattern[2]
+                        tmpl_path = pattern[3]
+                        scale = pattern[4]
 
-            plt.title(f'Area {area_index + 1}: {len(matched_patterns)} patterns detected')
+                        rect = plt.Rectangle(
+                            (x, y), w, h, edgecolor='lime', facecolor='none', linewidth=2)
+                        ax.add_patch(rect)
+                        ax.text(x, y - 5,
+                                f'{os.path.basename(tmpl_path)}\n'
+                                f'Score: {score:.3f} | Scale: {scale:.2f}',
+                                color='lime', fontsize=7,
+                                bbox=dict(boxstyle='round,pad=0.2',
+                                          facecolor='black', alpha=0.7))
 
-            output_filename = f"detected_area{area_index + 1}_{os.path.basename(screenshot_path)}"
-            output_path = os.path.join(self.output_folder, output_filename)
-            plt.savefig(output_path)
+                status = "MATCHED" if matched else "NO MATCH"
+                color = 'green' if matched else 'red'
+                ax.set_title(f'Area {area_idx + 1}: {status}', color=color, fontweight='bold')
+                ax.axis('off')
+
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            output_path = os.path.join(self.output_folder, f"detection_{timestamp}.png")
+            plt.tight_layout()
+            plt.savefig(output_path, dpi=100, bbox_inches='tight')
             plt.close(fig)
 
             self.display_image(output_path)
