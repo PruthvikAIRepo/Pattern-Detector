@@ -6,7 +6,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QLabel, QLineEdit, QPushButton, QFileDialog, QListWidget,
                              QInputDialog, QMessageBox, QScrollArea, QTabWidget, QGroupBox,
                              QFormLayout, QSpinBox, QDoubleSpinBox, QCheckBox, QProgressBar,
-                             QTextEdit, QTimeEdit, QTableWidget, QTableWidgetItem, QHeaderView)
+                             QTextEdit, QTimeEdit, QTableWidget, QTableWidgetItem, QHeaderView,
+                             QSystemTrayIcon, QMenu, QAction)
 from PyQt5.QtCore import (Qt, QTimer, QRect, pyqtSignal, QSettings, QMetaObject, Q_ARG,
                            pyqtSlot, QTime, QDateTime)
 from PyQt5.QtGui import QPixmap, QPainter, QColor, QIcon, QFont, QPalette
@@ -21,6 +22,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+APP_NAME = "PatternHawk"
+
 
 class ScreenCapturePatternDetector(QMainWindow):
 
@@ -31,12 +34,12 @@ class ScreenCapturePatternDetector(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Advanced Screen Capture Pattern Detector')
+        self.setWindowTitle(f"{APP_NAME} — Idle")
         self.setGeometry(100, 100, 1000, 800)
 
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bull-logo.jpg')
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
+        self.icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'PatternHawk.png')
+        if os.path.exists(self.icon_path):
+            self.setWindowIcon(QIcon(self.icon_path))
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -59,23 +62,33 @@ class ScreenCapturePatternDetector(QMainWindow):
         ]
         self.current_block_index = -1
 
-        self.settings = QSettings('YourCompany', 'ScreenCapturePatternDetector')
+        self.settings = QSettings('PatternHawk', 'PatternHawk')
 
-        self.main_folder = os.path.join(os.path.expanduser('~'), 'ScreenCapturePatternDetector')
-        self.data_file = os.path.join(self.main_folder, 'pattern_detector_data.json')
+        self.main_folder = os.path.join(os.path.expanduser('~'), 'PatternHawk')
+        self.data_file = os.path.join(self.main_folder, 'pattern_hawk_data.json')
         self.output_folder = os.path.join(self.main_folder, 'output')
         self.screenshot_folder = os.path.join(self.main_folder, 'screenshots')
+
+        # Migration: check old folder for data
+        old_folder = os.path.join(os.path.expanduser('~'), 'ScreenCapturePatternDetector')
+        old_data_file = os.path.join(old_folder, 'pattern_detector_data.json')
+        if not os.path.exists(self.data_file) and os.path.exists(old_data_file):
+            os.makedirs(self.main_folder, exist_ok=True)
+            import shutil
+            shutil.copy2(old_data_file, self.data_file)
 
         for folder in [self.main_folder, self.output_folder, self.screenshot_folder]:
             os.makedirs(folder, exist_ok=True)
 
         self.loadData()
         self.setup_ui()
+        self._setup_system_tray()
 
         self.current_selecting_area = 0
         self.last_displayed_image = None
         self.capture_in_progress = False
         self.capture_interval = 0
+        self.really_quit = False
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.capture_and_detect)
 
@@ -112,6 +125,68 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.schedule_timer.start(5000)
             self.current_block_index = -1
             self.check_schedule()
+
+    # ──────────────────────────────────────────────
+    #  System Tray
+    # ──────────────────────────────────────────────
+
+    def _setup_system_tray(self):
+        self.tray_icon = QSystemTrayIcon(self)
+        if os.path.exists(self.icon_path):
+            self.tray_icon.setIcon(QIcon(self.icon_path))
+        else:
+            self.tray_icon.setIcon(self.style().standardIcon(
+                self.style().SP_ComputerIcon))
+        self.tray_icon.setToolTip(APP_NAME)
+
+        tray_menu = QMenu()
+
+        show_action = QAction("Show / Hide", self)
+        show_action.triggered.connect(self._toggle_window)
+        tray_menu.addAction(show_action)
+
+        tray_menu.addSeparator()
+
+        start_action = QAction("Start Capture", self)
+        start_action.triggered.connect(self.start_capture)
+        tray_menu.addAction(start_action)
+
+        stop_action = QAction("Stop Capture", self)
+        stop_action.triggered.connect(self.stop_capture)
+        tray_menu.addAction(stop_action)
+
+        tray_menu.addSeparator()
+
+        quit_action = QAction("Quit", self)
+        quit_action.triggered.connect(self._quit_app)
+        tray_menu.addAction(quit_action)
+
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self._tray_activated)
+        self.tray_icon.show()
+
+    def _toggle_window(self):
+        if self.isVisible():
+            self.hide()
+        else:
+            self.show()
+            self.activateWindow()
+
+    def _tray_activated(self, reason):
+        if reason == QSystemTrayIcon.DoubleClick:
+            self._toggle_window()
+
+    def _quit_app(self):
+        self.really_quit = True
+        self.close()
+
+    def _update_window_title(self, status=None):
+        if status:
+            self.setWindowTitle(f"{APP_NAME} — {status}")
+            self.tray_icon.setToolTip(f"{APP_NAME} — {status}")
+        else:
+            self.setWindowTitle(f"{APP_NAME} — Idle")
+            self.tray_icon.setToolTip(f"{APP_NAME} — Idle")
 
     # ──────────────────────────────────────────────
     #  Cooldown system
@@ -174,9 +249,17 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.select_area_buttons = []
         self.area_labels = []
         self.area_active_checkboxes = []
+        self.area_status_labels = []
 
         for i in range(3):
             row = QHBoxLayout()
+
+            # Status indicator
+            status_lbl = QLabel("\u2B24")  # ● circle
+            status_lbl.setStyleSheet("color: #666666; font-size: 14px;")
+            status_lbl.setFixedWidth(20)
+            status_lbl.setToolTip("Inactive")
+            row.addWidget(status_lbl)
 
             btn = QPushButton(f"Select Area {i + 1}")
             btn.clicked.connect(lambda checked, idx=i: self.select_area(idx))
@@ -197,6 +280,7 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.select_area_buttons.append(btn)
             self.area_labels.append(label)
             self.area_active_checkboxes.append(checkbox)
+            self.area_status_labels.append(status_lbl)
 
         # ── Capture Settings ──
         capture_group = QGroupBox("Capture Settings")
@@ -222,22 +306,37 @@ class ScreenCapturePatternDetector(QMainWindow):
         time_input_layout.addWidget(self.capture_seconds_input)
         capture_settings_layout.addRow("Capture Interval:", time_input_layout)
 
+        # ── Start / Stop / Pause buttons ──
+        button_layout = QHBoxLayout()
+
         self.start_capture_button = QPushButton("Start Capture")
+        self.start_capture_button.setStyleSheet(
+            "QPushButton { background-color: #2d7d46; } QPushButton:hover { background-color: #35a055; }")
         self.start_capture_button.clicked.connect(self.start_capture)
-        capture_settings_layout.addRow(self.start_capture_button)
+        button_layout.addWidget(self.start_capture_button)
+
+        self.stop_capture_button = QPushButton("Stop Capture")
+        self.stop_capture_button.setStyleSheet(
+            "QPushButton { background-color: #a03535; } QPushButton:hover { background-color: #c04545; }")
+        self.stop_capture_button.clicked.connect(self.stop_capture)
+        self.stop_capture_button.setEnabled(False)
+        button_layout.addWidget(self.stop_capture_button)
+
+        self.pause_capture_button = QPushButton("Pause Capture")
+        self.pause_capture_button.clicked.connect(self.pause_capture)
+        self.pause_capture_button.setEnabled(False)
+        button_layout.addWidget(self.pause_capture_button)
+
+        capture_settings_layout.addRow(button_layout)
 
         self.pause_duration_input = QSpinBox()
         self.pause_duration_input.setRange(1, 3600)
         self.pause_duration_input.setValue(120)
         capture_settings_layout.addRow("Pause Duration (seconds):", self.pause_duration_input)
 
-        self.pause_capture_button = QPushButton("Pause Capture")
-        self.pause_capture_button.clicked.connect(self.pause_capture)
-        self.pause_capture_button.setEnabled(False)
-        capture_settings_layout.addRow(self.pause_capture_button)
-
         # ── Status & Progress ──
         self.status_label = QLabel("Ready")
+        self.status_label.setStyleSheet("font-weight: bold; padding: 4px;")
         capture_layout.addWidget(self.status_label)
 
         self.progress_bar = QProgressBar()
@@ -324,26 +423,22 @@ class ScreenCapturePatternDetector(QMainWindow):
             end_minute = (minute + 15) % 60
             time_str = f"{hour:02d}:{minute:02d} - {end_hour:02d}:{end_minute:02d}"
 
-            # Time column (read-only)
             time_item = QTableWidgetItem(time_str)
             time_item.setFlags(time_item.flags() & ~Qt.ItemIsEditable)
             self.schedule_table.setItem(row, 0, time_item)
 
             block = self.schedule[row]
 
-            # Area checkboxes (columns 1-3)
             for area_idx in range(3):
                 item = QTableWidgetItem()
                 item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
                 item.setCheckState(Qt.Checked if block["areas_active"][area_idx] else Qt.Unchecked)
                 self.schedule_table.setItem(row, 1 + area_idx, item)
 
-            # Interval (column 4)
             interval_item = QTableWidgetItem(str(block["capture_interval"]))
             interval_item.setTextAlignment(Qt.AlignCenter)
             self.schedule_table.setItem(row, 4, interval_item)
 
-            # Cooldown (column 5)
             cooldown_item = QTableWidgetItem(str(block["cooldown"]))
             cooldown_item.setTextAlignment(Qt.AlignCenter)
             self.schedule_table.setItem(row, 5, cooldown_item)
@@ -355,10 +450,19 @@ class ScreenCapturePatternDetector(QMainWindow):
 
         scheduler_layout.addWidget(self.schedule_table)
 
+        # Auto-scroll to current block
+        current_block = self.get_current_block_index()
+        self.schedule_table.scrollToItem(
+            self.schedule_table.item(current_block, 0),
+            QTableWidget.PositionAtCenter)
+        self._highlight_current_block(current_block, -1)
+
         # ── Action buttons ──
         actions_layout = QHBoxLayout()
 
         save_btn = QPushButton("Save Schedule")
+        save_btn.setStyleSheet(
+            "QPushButton { background-color: #2d7d46; } QPushButton:hover { background-color: #35a055; }")
         save_btn.clicked.connect(self.save_schedule_from_table)
         actions_layout.addWidget(save_btn)
 
@@ -415,12 +519,38 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.log_text.setReadOnly(True)
         log_layout.addWidget(self.log_text)
 
+        clear_logs_btn = QPushButton("Clear Logs")
+        clear_logs_btn.clicked.connect(self.log_text.clear)
+        log_layout.addWidget(clear_logs_btn)
+
     # ──────────────────────────────────────────────
-    #  Area active toggle
+    #  Area active toggle + status indicators
     # ──────────────────────────────────────────────
 
     def on_area_active_changed(self, area_index, state):
         self.areas[area_index]["active"] = (state == Qt.Checked)
+        self._update_area_status(area_index)
+
+    def _update_area_status(self, area_index, matched=None):
+        lbl = self.area_status_labels[area_index]
+        area = self.areas[area_index]
+
+        if not area["active"]:
+            lbl.setStyleSheet("color: #666666; font-size: 14px;")
+            lbl.setToolTip("Inactive")
+        elif matched is True:
+            lbl.setStyleSheet("color: #00cc00; font-size: 14px;")
+            lbl.setToolTip("Matched")
+        elif matched is False:
+            lbl.setStyleSheet("color: #cc0000; font-size: 14px;")
+            lbl.setToolTip("No match")
+        else:
+            lbl.setStyleSheet("color: #2a82da; font-size: 14px;")
+            lbl.setToolTip("Active — waiting")
+
+    def _reset_area_statuses(self):
+        for i in range(3):
+            self._update_area_status(i)
 
     # ──────────────────────────────────────────────
     #  Data persistence
@@ -445,7 +575,6 @@ class ScreenCapturePatternDetector(QMainWindow):
                             )
                         self.areas[i]["active"] = area_data.get("active", True)
 
-                # Load scheduler
                 self.schedule_enabled = data.get("schedule_enabled", False)
                 saved_schedule = data.get("schedule", [])
                 for i, block in enumerate(saved_schedule):
@@ -564,7 +693,6 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.schedule_enabled = (state == Qt.Checked)
 
         if self.schedule_enabled:
-            # Validate hotkey
             self.global_hotkey = self.global_hotkey_input.text().strip()
             if not self.global_hotkey:
                 QMessageBox.warning(self, "Error",
@@ -573,11 +701,10 @@ class ScreenCapturePatternDetector(QMainWindow):
                 self.schedule_enabled = False
                 return
 
-            # Save schedule from table first
             self.save_schedule_from_table()
 
-            # Disable manual controls
             self.start_capture_button.setEnabled(False)
+            self.stop_capture_button.setEnabled(False)
             self.pause_capture_button.setEnabled(False)
             self.delay_timer.setEnabled(False)
             self.capture_minutes_input.setEnabled(False)
@@ -585,23 +712,21 @@ class ScreenCapturePatternDetector(QMainWindow):
             for cb in self.area_active_checkboxes:
                 cb.setEnabled(False)
 
-            # Start scheduler
             self.current_block_index = -1
             self.schedule_timer.start(5000)
             self.check_schedule()
+            self._update_window_title("Scheduled")
             self.log_message("Scheduler ENABLED. Manual controls disabled.")
         else:
-            # Stop scheduler
             self.schedule_timer.stop()
 
-            # Stop any running capture
             if self.capture_in_progress:
                 self.capture_in_progress = False
                 self.timer.stop()
                 self.progress_timer.stop()
 
-            # Re-enable manual controls
             self.start_capture_button.setEnabled(True)
+            self.stop_capture_button.setEnabled(False)
             self.delay_timer.setEnabled(True)
             self.capture_minutes_input.setEnabled(True)
             self.capture_seconds_input.setEnabled(True)
@@ -610,6 +735,8 @@ class ScreenCapturePatternDetector(QMainWindow):
 
             self.progress_bar.setValue(0)
             self.status_label.setText("Ready (manual mode)")
+            self._update_window_title("Idle")
+            self._reset_area_statuses()
             self.log_message("Scheduler DISABLED. Manual controls re-enabled.")
 
         self._update_schedule_status_label()
@@ -621,9 +748,8 @@ class ScreenCapturePatternDetector(QMainWindow):
 
         block_idx = self.get_current_block_index()
         if block_idx == self.current_block_index:
-            return  # Same block, no change
+            return
 
-        # Block transition
         prev_block = self.current_block_index
         self.current_block_index = block_idx
         block = self.schedule[block_idx]
@@ -632,10 +758,10 @@ class ScreenCapturePatternDetector(QMainWindow):
         minute = (block_idx * 15) % 60
         self.log_message(f"Schedule block transition: {hour:02d}:{minute:02d} (block {block_idx})")
 
-        # Update area active states
         for i in range(3):
             self.areas[i]["active"] = block["areas_active"][i]
             self.area_active_checkboxes[i].setChecked(block["areas_active"][i])
+            self._update_area_status(i)
 
         any_active = any(
             block["areas_active"][i]
@@ -653,13 +779,13 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.log_message(
                 f"Active areas: {active_names}. Interval: {interval_sec}s. Cooldown: {block['cooldown']}s")
 
-            # Start or restart capture with new interval
             self.capture_in_progress = True
             self.timer.start(self.capture_interval)
             self.elapsed_time = 0
             self.progress_timer.start(1000)
             self.status_label.setText(
                 f"Scheduled: {', '.join(active_names)} active. Interval: {interval_sec}s")
+            self._update_window_title(f"Scheduled — {', '.join(active_names)}")
         else:
             if self.capture_in_progress:
                 self.capture_in_progress = False
@@ -668,9 +794,15 @@ class ScreenCapturePatternDetector(QMainWindow):
                 self.progress_bar.setValue(0)
             self.log_message("No active areas in this block. Capture paused.")
             self.status_label.setText("Scheduled: no active areas in current block")
+            self._update_window_title("Scheduled — Idle")
 
         self._update_schedule_status_label()
         self._highlight_current_block(block_idx, prev_block)
+
+        # Auto-scroll to current block
+        self.schedule_table.scrollToItem(
+            self.schedule_table.item(block_idx, 0),
+            QTableWidget.PositionAtCenter)
 
     def _update_schedule_status_label(self):
         if not self.schedule_enabled:
@@ -687,7 +819,7 @@ class ScreenCapturePatternDetector(QMainWindow):
             f"Schedule: ON | Block: {hour:02d}:{minute:02d} | Active: {active_str}")
 
     def _highlight_current_block(self, current, previous):
-        if previous >= 0 and previous < 96:
+        if 0 <= previous < 96:
             for col in range(6):
                 item = self.schedule_table.item(previous, col)
                 if item:
@@ -730,7 +862,6 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.saveData()
         self.log_message("Schedule saved.")
 
-        # Force re-check current block if scheduler is active
         if self.schedule_enabled:
             self.current_block_index = -1
             self.check_schedule()
@@ -801,13 +932,33 @@ class ScreenCapturePatternDetector(QMainWindow):
 
         self.status_label.setText(status_text)
         self.start_capture_button.setEnabled(False)
+        self.stop_capture_button.setEnabled(True)
         self.pause_capture_button.setEnabled(True)
         self._set_area_buttons_enabled(False)
         self.progress_bar.setValue(0)
+        self._reset_area_statuses()
+        self._update_window_title(f"Capturing ({active_count} areas)")
 
         if delay_seconds == 0:
             self.elapsed_time = 0
             self.progress_timer.start(1000)
+
+    def stop_capture(self):
+        self.capture_in_progress = False
+        self.timer.stop()
+        self.progress_timer.stop()
+        if hasattr(self, 'pause_timer'):
+            self.pause_timer.stop()
+
+        self.start_capture_button.setEnabled(True)
+        self.stop_capture_button.setEnabled(False)
+        self.pause_capture_button.setEnabled(False)
+        self._set_area_buttons_enabled(True)
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Capture stopped")
+        self._update_window_title("Idle")
+        self._reset_area_statuses()
+        self.log_message("Capture stopped by user.")
 
     def _set_area_buttons_enabled(self, enabled):
         for btn in self.select_area_buttons:
@@ -854,6 +1005,7 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.pause_capture_button.setEnabled(False)
             self.start_capture_button.setEnabled(False)
             self._set_area_buttons_enabled(False)
+            self._update_window_title("Paused")
 
     def resume_capture(self):
         self.capture_in_progress = True
@@ -863,6 +1015,8 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.pause_capture_button.setEnabled(True)
         self.start_capture_button.setEnabled(False)
         self._set_area_buttons_enabled(False)
+        active_count = sum(1 for a in self.areas if a["active"])
+        self._update_window_title(f"Capturing ({active_count} areas)")
 
     def update_progress_bar(self):
         if self.capture_in_progress and self.capture_interval > 0:
@@ -920,6 +1074,12 @@ class ScreenCapturePatternDetector(QMainWindow):
                 status = "MATCHED" if matched else "NO MATCH"
                 self.log_message(f"Area {i + 1}: {status} ({len(patterns)} pattern(s))")
 
+                # Update status indicator on main thread
+                QMetaObject.invokeMethod(
+                    self, "_update_area_status_slot",
+                    Qt.QueuedConnection,
+                    Q_ARG(int, i), Q_ARG(bool, matched))
+
             if not area_results:
                 self.log_message("No active areas with regions and templates configured.")
                 self.update_status.emit("No active areas configured.")
@@ -948,6 +1108,10 @@ class ScreenCapturePatternDetector(QMainWindow):
 
         except Exception as e:
             self.log_message(f"Error during capture and detect: {str(e)}")
+
+    @pyqtSlot(int, bool)
+    def _update_area_status_slot(self, area_index, matched):
+        self._update_area_status(area_index, matched)
 
     def capture_screen(self, region, area_index):
         screen = QApplication.primaryScreen()
@@ -1144,7 +1308,6 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.cooldown_timer.stop()
             self.cooldown_update_timer.stop()
 
-            # Disable scheduler if active
             if self.schedule_enabled:
                 self.schedule_enabled = False
                 self.schedule_enable_checkbox.setChecked(False)
@@ -1160,6 +1323,7 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.status_label.setText("Ready")
             self.cooldown_timer_label.setText("No active cooldown")
             self.start_capture_button.setEnabled(True)
+            self.stop_capture_button.setEnabled(False)
             self.pause_capture_button.setEnabled(False)
             self._set_area_buttons_enabled(True)
             self.delay_timer.setEnabled(True)
@@ -1176,6 +1340,8 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.screenshot_label.clear()
             self.last_displayed_image = None
 
+            self._update_window_title("Idle")
+            self._reset_area_statuses()
             self.log_message("Process has been reset")
             QMessageBox.information(self, "Reset Complete", "The process has been reset successfully.")
 
@@ -1205,11 +1371,21 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.display_image(self.last_displayed_image)
 
     def closeEvent(self, event):
-        if hasattr(self, 'cooldown_update_timer'):
-            self.cooldown_update_timer.stop()
-        if hasattr(self, 'schedule_timer'):
-            self.schedule_timer.stop()
-        super().closeEvent(event)
+        if self.really_quit:
+            if hasattr(self, 'cooldown_update_timer'):
+                self.cooldown_update_timer.stop()
+            if hasattr(self, 'schedule_timer'):
+                self.schedule_timer.stop()
+            if hasattr(self, 'tray_icon'):
+                self.tray_icon.hide()
+            event.accept()
+        else:
+            event.ignore()
+            self.hide()
+            self.tray_icon.showMessage(
+                APP_NAME,
+                "Running in the background. Right-click tray icon to quit.",
+                QSystemTrayIcon.Information, 2000)
 
 
 class AreaSelector(QWidget):
@@ -1258,7 +1434,7 @@ class AreaSelector(QWidget):
 if __name__ == '__main__':
     app = QApplication(sys.argv)
 
-    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bull-logo.jpg')
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'PatternHawk.png')
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
 
@@ -1289,13 +1465,22 @@ if __name__ == '__main__':
             border: 1px solid white;
         }
         QGroupBox {
-            border: 1px solid #ffffff;
+            border: 1px solid #555555;
             margin-top: 0.5em;
+            padding-top: 0.5em;
         }
         QGroupBox::title {
             subcontrol-origin: margin;
             left: 10px;
             padding: 0 3px 0 3px;
+        }
+        QProgressBar {
+            border: 1px solid #555555;
+            text-align: center;
+            height: 20px;
+        }
+        QProgressBar::chunk {
+            background-color: #2a82da;
         }
     """)
 
