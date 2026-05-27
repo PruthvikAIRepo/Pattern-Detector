@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QInputDialog, QMessageBox, QScrollArea, QTabWidget, QGroupBox,
                              QFormLayout, QSpinBox, QDoubleSpinBox, QCheckBox, QProgressBar,
                              QTextEdit, QTimeEdit, QTableWidget, QTableWidgetItem, QHeaderView,
-                             QSystemTrayIcon, QMenu, QAction)
+                             QSystemTrayIcon, QMenu, QAction, QComboBox)
 from PyQt5.QtCore import (Qt, QTimer, QRect, pyqtSignal, QSettings, QMetaObject, Q_ARG,
                            pyqtSlot, QTime, QDateTime)
 from PyQt5.QtGui import QPixmap, QPainter, QColor, QIcon, QFont, QPalette
@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 from skimage.metrics import structural_similarity as ssim
 import pyautogui
+import copy
 import threading
 import time
 
@@ -53,6 +54,7 @@ class ScreenCapturePatternDetector(QMainWindow):
         ]
         self.global_hotkey = ""
         self.max_templates = 10
+        self.template_sets = []  # max 9 named sets, shared across all areas
 
         # Scheduler data model: 96 blocks (15-min each)
         self.schedule_enabled = False
@@ -364,11 +366,34 @@ class ScreenCapturePatternDetector(QMainWindow):
         templates_tab_layout.addWidget(templates_scroll)
 
         self.template_lists = []
+        self.template_set_combos = []
 
         for i in range(3):
             group = QGroupBox(f"Area {i + 1} Templates")
             group_layout = QVBoxLayout(group)
 
+            # ── Template Set controls ──
+            set_layout = QHBoxLayout()
+
+            combo = QComboBox()
+            combo.addItem("(Select Template Set)")
+            for ts in self.template_sets:
+                combo.addItem(ts["name"])
+            combo.currentIndexChanged.connect(
+                lambda index, idx=i: self.load_template_set(idx, index))
+            set_layout.addWidget(combo)
+
+            save_set_btn = QPushButton("Save as Set")
+            save_set_btn.clicked.connect(lambda checked, idx=i: self.save_template_set(idx))
+            set_layout.addWidget(save_set_btn)
+
+            del_set_btn = QPushButton("Delete Set")
+            del_set_btn.clicked.connect(lambda checked, idx=i: self.delete_template_set(idx))
+            set_layout.addWidget(del_set_btn)
+
+            group_layout.addLayout(set_layout)
+
+            # ── Template controls ──
             controls = QHBoxLayout()
             add_btn = QPushButton("Add Template")
             add_btn.clicked.connect(lambda checked, idx=i: self.addTemplate(idx))
@@ -386,6 +411,7 @@ class ScreenCapturePatternDetector(QMainWindow):
 
             templates_layout.addWidget(group)
             self.template_lists.append(template_list)
+            self.template_set_combos.append(combo)
 
         for i in range(3):
             self.updateTemplateList(i)
@@ -575,6 +601,8 @@ class ScreenCapturePatternDetector(QMainWindow):
                             )
                         self.areas[i]["active"] = area_data.get("active", True)
 
+                self.template_sets = data.get("template_sets", [])[:9]
+
                 self.schedule_enabled = data.get("schedule_enabled", False)
                 saved_schedule = data.get("schedule", [])
                 for i, block in enumerate(saved_schedule):
@@ -598,6 +626,7 @@ class ScreenCapturePatternDetector(QMainWindow):
         data = {
             "global_hotkey": self.global_hotkey,
             "areas": [],
+            "template_sets": self.template_sets,
             "schedule_enabled": self.schedule_enabled,
             "schedule": self.schedule,
         }
@@ -661,6 +690,106 @@ class ScreenCapturePatternDetector(QMainWindow):
             file_name = os.path.basename(template['path'])
             template_list.addItem(
                 f"{i + 1}. {file_name} (Confidence: {template['similarity']})")
+
+    # ──────────────────────────────────────────────
+    #  Template Sets (save / load / delete)
+    # ──────────────────────────────────────────────
+
+    def save_template_set(self, area_index):
+        templates = self.areas[area_index]["templates"]
+        if not templates:
+            QMessageBox.warning(self, "Empty Templates",
+                                f"Area {area_index + 1} has no templates to save.")
+            return
+
+        name, ok = QInputDialog.getText(self, "Save Template Set",
+                                        "Enter a name for this template set:")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+
+        # Check if name already exists
+        for i, ts in enumerate(self.template_sets):
+            if ts["name"] == name:
+                reply = QMessageBox.question(
+                    self, "Overwrite Set",
+                    f'Template set "{name}" already exists. Overwrite?',
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    import copy
+                    self.template_sets[i]["templates"] = copy.deepcopy(templates)
+                    self._update_set_dropdowns()
+                    self.saveData()
+                    self.log_message(f'Template set "{name}" overwritten from Area {area_index + 1}')
+                return
+
+        if len(self.template_sets) >= 9:
+            QMessageBox.warning(self, "Limit Reached",
+                                "Maximum 9 template sets allowed. Delete a set first.")
+            return
+
+        self.template_sets.append({
+            "name": name,
+            "templates": copy.deepcopy(templates)
+        })
+        self._update_set_dropdowns()
+        self.saveData()
+        self.log_message(f'Template set "{name}" saved from Area {area_index + 1} ({len(templates)} templates)')
+
+    def load_template_set(self, area_index, combo_index):
+        if combo_index <= 0:
+            return  # Placeholder selected
+
+        set_index = combo_index - 1  # Offset for placeholder
+        if set_index >= len(self.template_sets):
+            return
+
+        ts = self.template_sets[set_index]
+        self.areas[area_index]["templates"] = copy.deepcopy(ts["templates"])
+        self.updateTemplateList(area_index)
+        self.saveData()
+        self.log_message(f'Loaded template set "{ts["name"]}" into Area {area_index + 1} ({len(ts["templates"])} templates)')
+        self.status_label.setText(f'Loaded "{ts["name"]}" into Area {area_index + 1}')
+
+        # Reset combo to placeholder so it can be re-selected
+        combo = self.template_set_combos[area_index]
+        combo.blockSignals(True)
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def delete_template_set(self, area_index):
+        combo = self.template_set_combos[area_index]
+        combo_index = combo.currentIndex()
+        if combo_index <= 0:
+            QMessageBox.information(self, "No Set Selected",
+                                    "Select a template set from the dropdown first.")
+            return
+
+        set_index = combo_index - 1
+        if set_index >= len(self.template_sets):
+            return
+
+        name = self.template_sets[set_index]["name"]
+        reply = QMessageBox.question(
+            self, "Delete Template Set",
+            f'Delete template set "{name}"? This cannot be undone.',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+
+        if reply == QMessageBox.Yes:
+            del self.template_sets[set_index]
+            self._update_set_dropdowns()
+            self.saveData()
+            self.log_message(f'Template set "{name}" deleted')
+
+    def _update_set_dropdowns(self):
+        for combo in self.template_set_combos:
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("(Select Template Set)")
+            for ts in self.template_sets:
+                combo.addItem(ts["name"])
+            combo.setCurrentIndex(0)
+            combo.blockSignals(False)
 
     # ──────────────────────────────────────────────
     #  Area selection
