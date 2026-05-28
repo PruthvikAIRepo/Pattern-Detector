@@ -774,11 +774,6 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.saveData()
             self.log_message(f'Loaded template set "{ts["name"]}" into Area {area_index + 1} ({len(ts["templates"])} templates)')
             self.status_label.setText(f'Loaded "{ts["name"]}" into Area {area_index + 1}')
-
-            combo = self.template_set_combos[area_index]
-            combo.blockSignals(True)
-            combo.setCurrentIndex(0)
-            combo.blockSignals(False)
         except Exception as e:
             error_msg = f"load_template_set error: {str(e)}\n{traceback.format_exc()}"
             self._log_error_to_file(error_msg)
