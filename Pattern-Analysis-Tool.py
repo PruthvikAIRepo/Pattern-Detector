@@ -16,8 +16,10 @@ import numpy as np
 from skimage.metrics import structural_similarity as ssim
 import pyautogui
 import copy
+import ctypes
 import threading
 import time
+import traceback
 
 import matplotlib
 matplotlib.use('Agg')
@@ -90,7 +92,6 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.last_displayed_image = None
         self.capture_in_progress = False
         self.capture_interval = 0
-        self.really_quit = False
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.capture_and_detect)
 
@@ -179,7 +180,6 @@ class ScreenCapturePatternDetector(QMainWindow):
             self._toggle_window()
 
     def _quit_app(self):
-        self.really_quit = True
         self.close()
 
     def _update_window_title(self, status=None):
@@ -189,6 +189,15 @@ class ScreenCapturePatternDetector(QMainWindow):
         else:
             self.setWindowTitle(f"{APP_NAME} — Idle")
             self.tray_icon.setToolTip(f"{APP_NAME} — Idle")
+
+    def _log_error_to_file(self, error_msg):
+        try:
+            log_path = os.path.join(self.main_folder, 'error.log')
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(f"[{timestamp}] {error_msg}\n")
+        except Exception:
+            pass
 
     # ──────────────────────────────────────────────
     #  Cooldown system
@@ -519,6 +528,11 @@ class ScreenCapturePatternDetector(QMainWindow):
         settings_layout.addRow("Neglect Previously Matched Templates:", self.neglect_matched)
         settings_layout.addRow(QLabel("Ignore templates that have been matched in the previous cycle"))
 
+        self.browser_hotkey_mode = QCheckBox()
+        self.browser_hotkey_mode.setChecked(self.settings.value('browser_hotkey', False, type=bool))
+        settings_layout.addRow("Browser-compatible hotkey:", self.browser_hotkey_mode)
+        settings_layout.addRow(QLabel("Enable for Chrome/browser-based applications (e.g., WealthCharts)"))
+
         self.cooldown_timer_input = QSpinBox()
         self.cooldown_timer_input.setRange(1, 900)
         self.cooldown_timer_input.setValue(self.settings.value('cooldown_timer', 5, type=int))
@@ -623,30 +637,35 @@ class ScreenCapturePatternDetector(QMainWindow):
             pass
 
     def saveData(self):
-        data = {
-            "global_hotkey": self.global_hotkey,
-            "areas": [],
-            "template_sets": self.template_sets,
-            "schedule_enabled": self.schedule_enabled,
-            "schedule": self.schedule,
-        }
-        for area in self.areas:
-            area_data = {
-                "templates": area["templates"],
-                "region": None,
-                "active": area["active"]
+        try:
+            data = {
+                "global_hotkey": self.global_hotkey,
+                "areas": [],
+                "template_sets": self.template_sets,
+                "schedule_enabled": self.schedule_enabled,
+                "schedule": self.schedule,
             }
-            if area["region"] is not None:
-                area_data["region"] = {
-                    "x": area["region"].x(),
-                    "y": area["region"].y(),
-                    "w": area["region"].width(),
-                    "h": area["region"].height()
+            for area in self.areas:
+                area_data = {
+                    "templates": area["templates"],
+                    "region": None,
+                    "active": area["active"]
                 }
-            data["areas"].append(area_data)
+                if area["region"] is not None:
+                    area_data["region"] = {
+                        "x": area["region"].x(),
+                        "y": area["region"].y(),
+                        "w": area["region"].width(),
+                        "h": area["region"].height()
+                    }
+                data["areas"].append(area_data)
 
-        with open(self.data_file, 'w') as f:
-            json.dump(data, f, indent=2)
+            with open(self.data_file, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            error_msg = f"saveData error: {str(e)}\n{traceback.format_exc()}"
+            self._log_error_to_file(error_msg)
+            self.log_message(f"Error saving data: {str(e)}")
 
     # ──────────────────────────────────────────────
     #  Template management (per area)
@@ -696,100 +715,116 @@ class ScreenCapturePatternDetector(QMainWindow):
     # ──────────────────────────────────────────────
 
     def save_template_set(self, area_index):
-        templates = self.areas[area_index]["templates"]
-        if not templates:
-            QMessageBox.warning(self, "Empty Templates",
-                                f"Area {area_index + 1} has no templates to save.")
-            return
-
-        name, ok = QInputDialog.getText(self, "Save Template Set",
-                                        "Enter a name for this template set:")
-        if not ok or not name.strip():
-            return
-        name = name.strip()
-
-        # Check if name already exists
-        for i, ts in enumerate(self.template_sets):
-            if ts["name"] == name:
-                reply = QMessageBox.question(
-                    self, "Overwrite Set",
-                    f'Template set "{name}" already exists. Overwrite?',
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                if reply == QMessageBox.Yes:
-                    import copy
-                    self.template_sets[i]["templates"] = copy.deepcopy(templates)
-                    self._update_set_dropdowns()
-                    self.saveData()
-                    self.log_message(f'Template set "{name}" overwritten from Area {area_index + 1}')
+        try:
+            templates = self.areas[area_index]["templates"]
+            if not templates:
+                QMessageBox.warning(self, "Empty Templates",
+                                    f"Area {area_index + 1} has no templates to save.")
                 return
 
-        if len(self.template_sets) >= 9:
-            QMessageBox.warning(self, "Limit Reached",
-                                "Maximum 9 template sets allowed. Delete a set first.")
-            return
+            name, ok = QInputDialog.getText(self, "Save Template Set",
+                                            "Enter a name for this template set:")
+            if not ok or not name.strip():
+                return
+            name = name.strip()
 
-        self.template_sets.append({
-            "name": name,
-            "templates": copy.deepcopy(templates)
-        })
-        self._update_set_dropdowns()
-        self.saveData()
-        self.log_message(f'Template set "{name}" saved from Area {area_index + 1} ({len(templates)} templates)')
+            # Check if name already exists
+            for i, ts in enumerate(self.template_sets):
+                if ts["name"] == name:
+                    reply = QMessageBox.question(
+                        self, "Overwrite Set",
+                        f'Template set "{name}" already exists. Overwrite?',
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                    if reply == QMessageBox.Yes:
+                        self.template_sets[i]["templates"] = copy.deepcopy(templates)
+                        self._update_set_dropdowns()
+                        self.saveData()
+                        self.log_message(f'Template set "{name}" overwritten from Area {area_index + 1}')
+                    return
 
-    def load_template_set(self, area_index, combo_index):
-        if combo_index <= 0:
-            return  # Placeholder selected
+            if len(self.template_sets) >= 9:
+                QMessageBox.warning(self, "Limit Reached",
+                                    "Maximum 9 template sets allowed. Delete a set first.")
+                return
 
-        set_index = combo_index - 1  # Offset for placeholder
-        if set_index >= len(self.template_sets):
-            return
-
-        ts = self.template_sets[set_index]
-        self.areas[area_index]["templates"] = copy.deepcopy(ts["templates"])
-        self.updateTemplateList(area_index)
-        self.saveData()
-        self.log_message(f'Loaded template set "{ts["name"]}" into Area {area_index + 1} ({len(ts["templates"])} templates)')
-        self.status_label.setText(f'Loaded "{ts["name"]}" into Area {area_index + 1}')
-
-        # Reset combo to placeholder so it can be re-selected
-        combo = self.template_set_combos[area_index]
-        combo.blockSignals(True)
-        combo.setCurrentIndex(0)
-        combo.blockSignals(False)
-
-    def delete_template_set(self, area_index):
-        combo = self.template_set_combos[area_index]
-        combo_index = combo.currentIndex()
-        if combo_index <= 0:
-            QMessageBox.information(self, "No Set Selected",
-                                    "Select a template set from the dropdown first.")
-            return
-
-        set_index = combo_index - 1
-        if set_index >= len(self.template_sets):
-            return
-
-        name = self.template_sets[set_index]["name"]
-        reply = QMessageBox.question(
-            self, "Delete Template Set",
-            f'Delete template set "{name}"? This cannot be undone.',
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-
-        if reply == QMessageBox.Yes:
-            del self.template_sets[set_index]
+            self.template_sets.append({
+                "name": name,
+                "templates": copy.deepcopy(templates)
+            })
             self._update_set_dropdowns()
             self.saveData()
-            self.log_message(f'Template set "{name}" deleted')
+            self.log_message(f'Template set "{name}" saved from Area {area_index + 1} ({len(templates)} templates)')
+        except Exception as e:
+            error_msg = f"save_template_set error: {str(e)}\n{traceback.format_exc()}"
+            self._log_error_to_file(error_msg)
+            QMessageBox.critical(self, "Error", f"Failed to save template set: {str(e)}")
 
-    def _update_set_dropdowns(self):
-        for combo in self.template_set_combos:
+    def load_template_set(self, area_index, combo_index):
+        try:
+            if combo_index <= 0:
+                return
+
+            set_index = combo_index - 1
+            if set_index >= len(self.template_sets):
+                return
+
+            ts = self.template_sets[set_index]
+            self.areas[area_index]["templates"] = copy.deepcopy(ts["templates"])
+            self.updateTemplateList(area_index)
+            self.saveData()
+            self.log_message(f'Loaded template set "{ts["name"]}" into Area {area_index + 1} ({len(ts["templates"])} templates)')
+            self.status_label.setText(f'Loaded "{ts["name"]}" into Area {area_index + 1}')
+
+            combo = self.template_set_combos[area_index]
             combo.blockSignals(True)
-            combo.clear()
-            combo.addItem("(Select Template Set)")
-            for ts in self.template_sets:
-                combo.addItem(ts["name"])
             combo.setCurrentIndex(0)
             combo.blockSignals(False)
+        except Exception as e:
+            error_msg = f"load_template_set error: {str(e)}\n{traceback.format_exc()}"
+            self._log_error_to_file(error_msg)
+            QMessageBox.critical(self, "Error", f"Failed to load template set: {str(e)}")
+
+    def delete_template_set(self, area_index):
+        try:
+            combo = self.template_set_combos[area_index]
+            combo_index = combo.currentIndex()
+            if combo_index <= 0:
+                QMessageBox.information(self, "No Set Selected",
+                                        "Select a template set from the dropdown first.")
+                return
+
+            set_index = combo_index - 1
+            if set_index >= len(self.template_sets):
+                return
+
+            name = self.template_sets[set_index]["name"]
+            reply = QMessageBox.question(
+                self, "Delete Template Set",
+                f'Delete template set "{name}"? This cannot be undone.',
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+
+            if reply == QMessageBox.Yes:
+                del self.template_sets[set_index]
+                self._update_set_dropdowns()
+                self.saveData()
+                self.log_message(f'Template set "{name}" deleted')
+        except Exception as e:
+            error_msg = f"delete_template_set error: {str(e)}\n{traceback.format_exc()}"
+            self._log_error_to_file(error_msg)
+            QMessageBox.critical(self, "Error", f"Failed to delete template set: {str(e)}")
+
+    def _update_set_dropdowns(self):
+        try:
+            for combo in self.template_set_combos:
+                combo.blockSignals(True)
+                combo.clear()
+                combo.addItem("(Select Template Set)")
+                for ts in self.template_sets:
+                    combo.addItem(ts["name"])
+                combo.setCurrentIndex(0)
+                combo.blockSignals(False)
+        except Exception as e:
+            self._log_error_to_file(f"_update_set_dropdowns error: {str(e)}\n{traceback.format_exc()}")
 
     # ──────────────────────────────────────────────
     #  Area selection
@@ -1408,11 +1443,63 @@ class ScreenCapturePatternDetector(QMainWindow):
 
     def perform_hotkey(self, hotkey):
         try:
-            pyautogui.hotkey(*hotkey.split('+'))
-            self.log_message(f"Hotkey performed: {hotkey}")
+            if self.browser_hotkey_mode.isChecked():
+                self._perform_hotkey_win32(hotkey)
+                self.log_message(f"Hotkey performed (Win32/browser mode): {hotkey}")
+            else:
+                pyautogui.hotkey(*hotkey.split('+'))
+                self.log_message(f"Hotkey performed (pyautogui): {hotkey}")
             self.start_cooldown_timer()
         except Exception as e:
             self.log_message(f"Error performing hotkey {hotkey}: {str(e)}")
+            self._log_error_to_file(f"perform_hotkey error: {str(e)}\n{traceback.format_exc()}")
+
+    def _perform_hotkey_win32(self, hotkey):
+        """Send hotkey via Windows keybd_event API with scan codes for browser compatibility."""
+        user32 = ctypes.windll.user32
+
+        VK_MAP = {
+            'alt': 0x12, 'ctrl': 0x11, 'shift': 0x10, 'win': 0x5B,
+            'enter': 0x0D, 'return': 0x0D, 'tab': 0x09, 'escape': 0x1B, 'esc': 0x1B,
+            'space': 0x20, 'backspace': 0x08, 'delete': 0x2E, 'del': 0x2E,
+            'up': 0x26, 'down': 0x28, 'left': 0x25, 'right': 0x27,
+            'home': 0x24, 'end': 0x23, 'pageup': 0x21, 'pagedown': 0x22,
+            'insert': 0x2D, 'printscreen': 0x2C,
+            'f1': 0x70, 'f2': 0x71, 'f3': 0x72, 'f4': 0x73,
+            'f5': 0x74, 'f6': 0x75, 'f7': 0x76, 'f8': 0x77,
+            'f9': 0x78, 'f10': 0x79, 'f11': 0x7A, 'f12': 0x7B,
+            '0': 0x30, '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34,
+            '5': 0x35, '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39,
+        }
+        # Add a-z
+        for c in range(ord('a'), ord('z') + 1):
+            VK_MAP[chr(c)] = c - 32  # VK codes for A-Z are 0x41-0x5A
+
+        KEYEVENTF_KEYUP = 0x0002
+
+        keys = [k.strip().lower() for k in hotkey.split('+')]
+        vk_codes = []
+
+        for key in keys:
+            vk = VK_MAP.get(key)
+            if vk is None and len(key) == 1:
+                vk = ord(key.upper())
+            if vk is None:
+                self.log_message(f"Warning: Unknown key '{key}' in hotkey")
+                continue
+            vk_codes.append(vk)
+
+        # Press all keys down
+        for vk in vk_codes:
+            scan = user32.MapVirtualKeyW(vk, 0)
+            user32.keybd_event(vk, scan, 0, 0)
+
+        time.sleep(0.05)
+
+        # Release all keys in reverse
+        for vk in reversed(vk_codes):
+            scan = user32.MapVirtualKeyW(vk, 0)
+            user32.keybd_event(vk, scan, KEYEVENTF_KEYUP, 0)
 
     # ──────────────────────────────────────────────
     #  Settings, reset, display, logging
@@ -1422,6 +1509,7 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.global_hotkey = self.global_hotkey_input.text().strip()
         self.settings.setValue('neglect_matched', self.neglect_matched.isChecked())
         self.settings.setValue('cooldown_timer', self.cooldown_timer_input.value())
+        self.settings.setValue('browser_hotkey', self.browser_hotkey_mode.isChecked())
         self.saveData()
         QMessageBox.information(self, "Settings Saved", "Your settings have been saved.")
 
