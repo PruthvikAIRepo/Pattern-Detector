@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QLabel, QLineEdit, QPushButton, QFileDialog, QListWidget,
                              QInputDialog, QMessageBox, QScrollArea, QTabWidget, QGroupBox,
                              QFormLayout, QSpinBox, QDoubleSpinBox, QCheckBox, QProgressBar,
-                             QTextEdit, QTimeEdit, QTableWidget, QTableWidgetItem, QHeaderView,
+                             QTextEdit, QPlainTextEdit, QTimeEdit, QTableWidget, QTableWidgetItem, QHeaderView,
                              QSystemTrayIcon, QMenu, QAction, QComboBox)
 from PyQt5.QtCore import (Qt, QTimer, QRect, pyqtSignal, QSettings, QMetaObject, Q_ARG,
                            pyqtSlot, QTime, QDateTime)
@@ -221,17 +221,32 @@ class ScreenCapturePatternDetector(QMainWindow):
         if self.cooldown_timer.isActive() and self.cooldown_end_time:
             remaining = QDateTime.currentDateTime().secsTo(self.cooldown_end_time)
             if remaining > 0:
-                self.cooldown_timer_label.setText(f"<font color='red'>{remaining} seconds remaining</font>")
+                text = f"<font color='red'>{remaining} seconds remaining</font>"
+                self.cooldown_timer_label.setText(text)
+                self.capture_cooldown_label.setText(text)
             else:
-                self.cooldown_timer_label.setText("<font color='red'>Cooldown ending...</font>")
+                text = "<font color='red'>Cooldown ending...</font>"
+                self.cooldown_timer_label.setText(text)
+                self.capture_cooldown_label.setText(text)
         else:
             self.cooldown_timer_label.setText("No active cooldown")
+            self.capture_cooldown_label.setText("No active cooldown")
             self.cooldown_update_timer.stop()
 
     def cooldown_finished(self):
         self.in_cooldown = False
         self.cooldown_timer_label.setText("No active cooldown")
-        self.log_message("Cooldown period finished. Ready for next hotkey.")
+        self.capture_cooldown_label.setText("No active cooldown")
+        self.log_message("Cooldown finished. Ready for next hotkey.")
+
+    def reset_cooldown(self):
+        self.cooldown_timer.stop()
+        self.cooldown_update_timer.stop()
+        self.in_cooldown = False
+        self.cooldown_end_time = None
+        self.cooldown_timer_label.setText("No active cooldown")
+        self.capture_cooldown_label.setText("No active cooldown")
+        self.log_message("Cooldown manually reset. Ready for next hotkey.")
 
     # ──────────────────────────────────────────────
     #  UI Setup
@@ -353,6 +368,22 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         capture_layout.addWidget(self.progress_bar)
+
+        # ── Cooldown Display ──
+        cooldown_group = QGroupBox("Cooldown")
+        cooldown_row = QHBoxLayout(cooldown_group)
+
+        self.capture_cooldown_label = QLabel("No active cooldown")
+        self.capture_cooldown_label.setStyleSheet("padding: 2px;")
+        cooldown_row.addWidget(self.capture_cooldown_label)
+
+        reset_cooldown_btn = QPushButton("Reset Cooldown")
+        reset_cooldown_btn.setStyleSheet(
+            "QPushButton { background-color: #a07d2d; } QPushButton:hover { background-color: #c09935; }")
+        reset_cooldown_btn.clicked.connect(self.reset_cooldown)
+        cooldown_row.addWidget(reset_cooldown_btn)
+
+        capture_layout.addWidget(cooldown_group)
 
         # ── Screenshot Display ──
         self.screenshot_label = QLabel()
@@ -555,8 +586,9 @@ class ScreenCapturePatternDetector(QMainWindow):
         log_layout = QVBoxLayout(log_tab)
         self.tab_widget.addTab(log_tab, "Logs")
 
-        self.log_text = QTextEdit()
+        self.log_text = QPlainTextEdit()
         self.log_text.setReadOnly(True)
+        self.log_text.setMaximumBlockCount(500)
         log_layout.addWidget(self.log_text)
 
         clear_logs_btn = QPushButton("Clear Logs")
@@ -1204,7 +1236,6 @@ class ScreenCapturePatternDetector(QMainWindow):
 
     def capture_and_detect(self):
         if self.capture_in_progress:
-            self.log_message("Starting capture and detection cycle")
             threading.Thread(target=self._capture_and_detect_thread).start()
         self.elapsed_time = 0
         self.progress_bar.setValue(0)
@@ -1218,20 +1249,13 @@ class ScreenCapturePatternDetector(QMainWindow):
                 if not area["active"] or area["region"] is None or not area["templates"]:
                     continue
 
-                self.log_message(f"Capturing Area {i + 1}")
                 screenshot = self.capture_screen(area["region"], i)
-                self.log_message(f"Area {i + 1} screenshot: {screenshot}")
-
-                self.log_message(f"Detecting patterns in Area {i + 1}")
                 matched, patterns = self.detect_pattern_for_area(
                     screenshot, area["templates"], area["neglect_count"])
 
                 area_results[i] = matched
                 if patterns:
                     area_matched_data[i] = (patterns, screenshot)
-
-                status = "MATCHED" if matched else "NO MATCH"
-                self.log_message(f"Area {i + 1}: {status} ({len(patterns)} pattern(s))")
 
                 # Update status indicator on main thread
                 QMetaObject.invokeMethod(
@@ -1240,25 +1264,21 @@ class ScreenCapturePatternDetector(QMainWindow):
                     Q_ARG(int, i), Q_ARG(bool, matched))
 
             if not area_results:
-                self.log_message("No active areas with regions and templates configured.")
                 self.update_status.emit("No active areas configured.")
                 return
 
             all_matched = all(area_results.values())
 
             if all_matched and not self.in_cooldown:
-                self.log_message("ALL active areas matched! Executing global hotkey.")
+                self.log_message("ALL areas matched! Hotkey executed: " + self.global_hotkey)
                 self.perform_hotkey(self.global_hotkey)
                 status_msg = f"All {len(area_results)} area(s) matched. Hotkey executed: {self.global_hotkey}"
             elif all_matched and self.in_cooldown:
-                self.log_message("All areas matched but in cooldown. Hotkey not executed.")
                 status_msg = f"All areas matched. Hotkey skipped (cooldown active)."
             else:
                 matched_areas = [i + 1 for i, m in area_results.items() if m]
                 unmatched_areas = [i + 1 for i, m in area_results.items() if not m]
-                self.log_message(
-                    f"AND condition NOT met. Matched: {matched_areas}, Unmatched: {unmatched_areas}")
-                status_msg = f"Matched: Area {matched_areas}, No match: Area {unmatched_areas}. Hotkey not executed."
+                status_msg = f"Matched: Area {matched_areas}, No match: Area {unmatched_areas}."
 
             self.update_status.emit(status_msg)
 
@@ -1299,7 +1319,6 @@ class ScreenCapturePatternDetector(QMainWindow):
 
                 if (neglect_matched and template_path in neglect_count
                         and neglect_count[template_path] > 0):
-                    self.log_message(f"Skipping template {os.path.basename(template_path)} (neglect)")
                     neglect_count[template_path] -= 1
                     if neglect_count[template_path] == 0:
                         del neglect_count[template_path]
@@ -1534,6 +1553,7 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.progress_bar.setValue(0)
             self.status_label.setText("Ready")
             self.cooldown_timer_label.setText("No active cooldown")
+            self.capture_cooldown_label.setText("No active cooldown")
             self.start_capture_button.setEnabled(True)
             self.stop_capture_button.setEnabled(False)
             self.pause_capture_button.setEnabled(False)
@@ -1560,7 +1580,7 @@ class ScreenCapturePatternDetector(QMainWindow):
     def log_message(self, message):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_entry = f"[{timestamp}] {message}"
-        QMetaObject.invokeMethod(self.log_text, "append",
+        QMetaObject.invokeMethod(self.log_text, "appendPlainText",
                                  Qt.QueuedConnection,
                                  Q_ARG(str, log_entry))
 
