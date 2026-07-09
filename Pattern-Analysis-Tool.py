@@ -26,6 +26,9 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 APP_NAME = "PatternHawk"
+NUM_AREAS = 5
+SCHEDULE_BLOCK_MINUTES = 10
+SCHEDULE_BLOCKS = (24 * 60) // SCHEDULE_BLOCK_MINUTES  # 144
 
 
 class ScreenCapturePatternDetector(QMainWindow):
@@ -48,21 +51,20 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.setCentralWidget(self.central_widget)
         self.layout = QVBoxLayout(self.central_widget)
 
-        # Data model: 3 areas
+        # Data model: 5 areas
         self.areas = [
-            {"region": None, "templates": [], "active": True, "neglect_count": {}},
-            {"region": None, "templates": [], "active": True, "neglect_count": {}},
-            {"region": None, "templates": [], "active": True, "neglect_count": {}},
+            {"region": None, "templates": [], "active": True, "neglect_count": {}}
+            for _ in range(NUM_AREAS)
         ]
         self.global_hotkey = ""
         self.max_templates = 10
         self.template_sets = []  # max 9 named sets, shared across all areas
 
-        # Scheduler data model: 96 blocks (15-min each)
+        # Scheduler data model
         self.schedule_enabled = False
         self.schedule = [
-            {"areas_active": [False, False, False], "capture_interval": 30, "cooldown": 5}
-            for _ in range(96)
+            {"areas_active": [False] * NUM_AREAS, "capture_interval": 30, "cooldown": 5}
+            for _ in range(SCHEDULE_BLOCKS)
         ]
         self.current_block_index = -1
 
@@ -277,7 +279,7 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.area_active_checkboxes = []
         self.area_status_labels = []
 
-        for i in range(3):
+        for i in range(NUM_AREAS):
             row = QHBoxLayout()
 
             # Status indicator
@@ -408,7 +410,7 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.template_lists = []
         self.template_set_combos = []
 
-        for i in range(3):
+        for i in range(NUM_AREAS):
             group = QGroupBox(f"Area {i + 1} Templates")
             group_layout = QVBoxLayout(group)
 
@@ -453,7 +455,7 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.template_lists.append(template_list)
             self.template_set_combos.append(combo)
 
-        for i in range(3):
+        for i in range(NUM_AREAS):
             self.updateTemplateList(i)
 
     def _setup_scheduler_tab(self):
@@ -477,16 +479,18 @@ class ScreenCapturePatternDetector(QMainWindow):
         scheduler_layout.addLayout(toggle_layout)
 
         # ── Schedule table ──
-        self.schedule_table = QTableWidget(96, 6)
-        self.schedule_table.setHorizontalHeaderLabels([
-            "Time", "Area 1", "Area 2", "Area 3", "Interval (s)", "Cooldown (s)"
-        ])
+        num_cols = NUM_AREAS + 3  # Time + areas + Interval + Cooldown
+        self.schedule_table = QTableWidget(SCHEDULE_BLOCKS, num_cols)
+        headers = ["Time"] + [f"Area {i+1}" for i in range(NUM_AREAS)] + ["Interval (s)", "Cooldown (s)"]
+        self.schedule_table.setHorizontalHeaderLabels(headers)
 
-        for row in range(96):
-            hour = (row * 15) // 60
-            minute = (row * 15) % 60
-            end_hour = hour + (minute + 15) // 60
-            end_minute = (minute + 15) % 60
+        for row in range(SCHEDULE_BLOCKS):
+            total_min = row * SCHEDULE_BLOCK_MINUTES
+            hour = total_min // 60
+            minute = total_min % 60
+            end_total = total_min + SCHEDULE_BLOCK_MINUTES
+            end_hour = end_total // 60
+            end_minute = end_total % 60
             time_str = f"{hour:02d}:{minute:02d} - {end_hour:02d}:{end_minute:02d}"
 
             time_item = QTableWidgetItem(time_str)
@@ -495,22 +499,23 @@ class ScreenCapturePatternDetector(QMainWindow):
 
             block = self.schedule[row]
 
-            for area_idx in range(3):
+            for area_idx in range(NUM_AREAS):
+                active = block["areas_active"][area_idx] if area_idx < len(block["areas_active"]) else False
                 item = QTableWidgetItem()
                 item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-                item.setCheckState(Qt.Checked if block["areas_active"][area_idx] else Qt.Unchecked)
+                item.setCheckState(Qt.Checked if active else Qt.Unchecked)
                 self.schedule_table.setItem(row, 1 + area_idx, item)
 
             interval_item = QTableWidgetItem(str(block["capture_interval"]))
             interval_item.setTextAlignment(Qt.AlignCenter)
-            self.schedule_table.setItem(row, 4, interval_item)
+            self.schedule_table.setItem(row, 1 + NUM_AREAS, interval_item)
 
             cooldown_item = QTableWidgetItem(str(block["cooldown"]))
             cooldown_item.setTextAlignment(Qt.AlignCenter)
-            self.schedule_table.setItem(row, 5, cooldown_item)
+            self.schedule_table.setItem(row, 2 + NUM_AREAS, cooldown_item)
 
         self.schedule_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        for col in range(1, 6):
+        for col in range(1, num_cols):
             self.schedule_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.Stretch)
         self.schedule_table.verticalHeader().setVisible(False)
 
@@ -532,7 +537,7 @@ class ScreenCapturePatternDetector(QMainWindow):
         save_btn.clicked.connect(self.save_schedule_from_table)
         actions_layout.addWidget(save_btn)
 
-        for i in range(3):
+        for i in range(NUM_AREAS):
             sel_btn = QPushButton(f"All A{i + 1}")
             sel_btn.clicked.connect(lambda checked, idx=i: self.schedule_toggle_area(idx, True))
             actions_layout.addWidget(sel_btn)
@@ -545,41 +550,76 @@ class ScreenCapturePatternDetector(QMainWindow):
 
     def _setup_settings_tab(self):
         settings_tab = QWidget()
-        settings_layout = QFormLayout(settings_tab)
+        settings_main_layout = QVBoxLayout(settings_tab)
         self.tab_widget.addTab(settings_tab, "Settings")
+
+        # ── Hotkey Settings ──
+        hotkey_group = QGroupBox("Hotkey Settings")
+        hotkey_layout = QFormLayout(hotkey_group)
 
         self.global_hotkey_input = QLineEdit()
         self.global_hotkey_input.setText(self.global_hotkey)
         self.global_hotkey_input.setPlaceholderText("e.g., ctrl+shift+a")
-        settings_layout.addRow("Global Hotkey:", self.global_hotkey_input)
-        settings_layout.addRow(QLabel("Hotkey executed when ALL active areas match simultaneously"))
+        hotkey_layout.addRow("Global Hotkey:", self.global_hotkey_input)
 
-        self.neglect_matched = QCheckBox()
-        self.neglect_matched.setChecked(self.settings.value('neglect_matched', True, type=bool))
-        settings_layout.addRow("Neglect Previously Matched Templates:", self.neglect_matched)
-        settings_layout.addRow(QLabel("Ignore templates that have been matched in the previous cycle"))
-
-        self.browser_hotkey_mode = QCheckBox()
+        self.browser_hotkey_mode = QCheckBox("Enable for Chrome/browser-based apps")
         self.browser_hotkey_mode.setChecked(self.settings.value('browser_hotkey', False, type=bool))
-        settings_layout.addRow("Browser-compatible hotkey:", self.browser_hotkey_mode)
-        settings_layout.addRow(QLabel("Enable for Chrome/browser-based applications (e.g., WealthCharts)"))
+        hotkey_layout.addRow("Browser-compatible:", self.browser_hotkey_mode)
+
+        self.hotkey_delay_input = QDoubleSpinBox()
+        self.hotkey_delay_input.setRange(0, 5.0)
+        self.hotkey_delay_input.setSingleStep(0.1)
+        self.hotkey_delay_input.setDecimals(1)
+        self.hotkey_delay_input.setValue(self.settings.value('hotkey_delay', 0.1, type=float))
+        hotkey_layout.addRow("Key Press Delay (sec):", self.hotkey_delay_input)
+
+        settings_main_layout.addWidget(hotkey_group)
+
+        # ── Detection Settings ──
+        detection_group = QGroupBox("Detection Settings")
+        detection_layout = QFormLayout(detection_group)
+
+        self.neglect_matched = QCheckBox("Skip templates matched in previous cycle")
+        self.neglect_matched.setChecked(self.settings.value('neglect_matched', True, type=bool))
+        detection_layout.addRow("Neglect Matched:", self.neglect_matched)
+
+        self.save_files_checkbox = QCheckBox("Save to disk (disable to reduce CPU load)")
+        self.save_files_checkbox.setChecked(self.settings.value('save_files', True, type=bool))
+        detection_layout.addRow("Screenshots/Output:", self.save_files_checkbox)
+
+        settings_main_layout.addWidget(detection_group)
+
+        # ── Cooldown Settings ──
+        cooldown_group = QGroupBox("Cooldown Settings")
+        cooldown_layout = QFormLayout(cooldown_group)
 
         self.cooldown_timer_input = QSpinBox()
         self.cooldown_timer_input.setRange(1, 900)
         self.cooldown_timer_input.setValue(self.settings.value('cooldown_timer', 5, type=int))
-        settings_layout.addRow("Cooldown Timer (seconds):", self.cooldown_timer_input)
-        settings_layout.addRow(QLabel("Time to wait before executing another hotkey"))
+        cooldown_layout.addRow("Cooldown Timer (sec):", self.cooldown_timer_input)
 
         self.cooldown_timer_label = QLabel("No active cooldown")
-        settings_layout.addRow("Cooldown Remaining:", self.cooldown_timer_label)
+        cooldown_layout.addRow("Cooldown Remaining:", self.cooldown_timer_label)
+
+        settings_main_layout.addWidget(cooldown_group)
+
+        # ── Actions ──
+        actions_layout = QHBoxLayout()
 
         self.reset_button = QPushButton("Reset Process")
+        self.reset_button.setStyleSheet(
+            "QPushButton { background-color: #a03535; } QPushButton:hover { background-color: #c04545; }")
         self.reset_button.clicked.connect(self.reset_process)
-        settings_layout.addRow(self.reset_button)
+        actions_layout.addWidget(self.reset_button)
 
         save_settings_button = QPushButton("Save Settings")
+        save_settings_button.setStyleSheet(
+            "QPushButton { background-color: #2d7d46; } QPushButton:hover { background-color: #35a055; }")
         save_settings_button.clicked.connect(self.save_settings)
-        settings_layout.addRow(save_settings_button)
+        actions_layout.addWidget(save_settings_button)
+
+        settings_main_layout.addLayout(actions_layout)
+        settings_main_layout.addStretch()
 
     def _setup_logs_tab(self):
         log_tab = QWidget()
@@ -621,7 +661,7 @@ class ScreenCapturePatternDetector(QMainWindow):
             lbl.setToolTip("Active — waiting")
 
     def _reset_area_statuses(self):
-        for i in range(3):
+        for i in range(NUM_AREAS):
             self._update_area_status(i)
 
     # ──────────────────────────────────────────────
@@ -638,7 +678,7 @@ class ScreenCapturePatternDetector(QMainWindow):
             if isinstance(data, dict) and "areas" in data:
                 self.global_hotkey = data.get("global_hotkey", "")
                 for i, area_data in enumerate(data.get("areas", [])):
-                    if i < 3:
+                    if i < NUM_AREAS:
                         self.areas[i]["templates"] = area_data.get("templates", [])
                         region = area_data.get("region")
                         if region:
@@ -652,9 +692,13 @@ class ScreenCapturePatternDetector(QMainWindow):
                 self.schedule_enabled = data.get("schedule_enabled", False)
                 saved_schedule = data.get("schedule", [])
                 for i, block in enumerate(saved_schedule):
-                    if i < 96:
+                    if i < SCHEDULE_BLOCKS:
+                        areas_active = block.get("areas_active", [False] * NUM_AREAS)
+                        # Pad if old data had fewer areas
+                        while len(areas_active) < NUM_AREAS:
+                            areas_active.append(False)
                         self.schedule[i] = {
-                            "areas_active": block.get("areas_active", [False, False, False]),
+                            "areas_active": areas_active[:NUM_AREAS],
                             "capture_interval": block.get("capture_interval", 30),
                             "cooldown": block.get("cooldown", 5),
                         }
@@ -878,7 +922,7 @@ class ScreenCapturePatternDetector(QMainWindow):
 
     def get_current_block_index(self):
         now = QTime.currentTime()
-        return (now.hour() * 60 + now.minute()) // 15
+        return (now.hour() * 60 + now.minute()) // SCHEDULE_BLOCK_MINUTES
 
     def on_schedule_enabled_changed(self, state):
         self.schedule_enabled = (state == Qt.Checked)
@@ -945,27 +989,31 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.current_block_index = block_idx
         block = self.schedule[block_idx]
 
-        hour = (block_idx * 15) // 60
-        minute = (block_idx * 15) % 60
+        total_min = block_idx * SCHEDULE_BLOCK_MINUTES
+        hour = total_min // 60
+        minute = total_min % 60
         self.log_message(f"Schedule block transition: {hour:02d}:{minute:02d} (block {block_idx})")
 
-        for i in range(3):
-            self.areas[i]["active"] = block["areas_active"][i]
-            self.area_active_checkboxes[i].setChecked(block["areas_active"][i])
+        for i in range(NUM_AREAS):
+            active = block["areas_active"][i] if i < len(block["areas_active"]) else False
+            self.areas[i]["active"] = active
+            self.area_active_checkboxes[i].setChecked(active)
             self._update_area_status(i)
 
         any_active = any(
             block["areas_active"][i]
             and self.areas[i]["region"] is not None
             and len(self.areas[i]["templates"]) > 0
-            for i in range(3)
+            for i in range(NUM_AREAS)
+            if i < len(block["areas_active"])
         )
 
         if any_active:
             self.capture_interval = block["capture_interval"] * 1000
             self.cooldown_timer_input.setValue(block["cooldown"])
 
-            active_names = [f"A{i+1}" for i in range(3) if block["areas_active"][i]]
+            active_names = [f"A{i+1}" for i in range(NUM_AREAS)
+                           if i < len(block["areas_active"]) and block["areas_active"][i]]
             interval_sec = block["capture_interval"]
             self.log_message(
                 f"Active areas: {active_names}. Interval: {interval_sec}s. Cooldown: {block['cooldown']}s")
@@ -1001,36 +1049,39 @@ class ScreenCapturePatternDetector(QMainWindow):
             return
 
         block_idx = self.get_current_block_index()
-        hour = (block_idx * 15) // 60
-        minute = (block_idx * 15) % 60
+        total_min = block_idx * SCHEDULE_BLOCK_MINUTES
+        hour = total_min // 60
+        minute = total_min % 60
         block = self.schedule[block_idx]
-        active = [f"A{i+1}" for i in range(3) if block["areas_active"][i]]
+        active = [f"A{i+1}" for i in range(NUM_AREAS)
+                 if i < len(block["areas_active"]) and block["areas_active"][i]]
         active_str = ", ".join(active) if active else "none"
         self.schedule_status_label.setText(
             f"Schedule: ON | Block: {hour:02d}:{minute:02d} | Active: {active_str}")
 
     def _highlight_current_block(self, current, previous):
-        if 0 <= previous < 96:
-            for col in range(6):
+        num_cols = NUM_AREAS + 3
+        if 0 <= previous < SCHEDULE_BLOCKS:
+            for col in range(num_cols):
                 item = self.schedule_table.item(previous, col)
                 if item:
                     item.setBackground(QColor(25, 25, 25))
 
-        if 0 <= current < 96:
-            for col in range(6):
+        if 0 <= current < SCHEDULE_BLOCKS:
+            for col in range(num_cols):
                 item = self.schedule_table.item(current, col)
                 if item:
                     item.setBackground(QColor(42, 130, 218, 80))
 
     def save_schedule_from_table(self):
-        for row in range(96):
+        for row in range(SCHEDULE_BLOCKS):
             areas_active = []
-            for area_idx in range(3):
+            for area_idx in range(NUM_AREAS):
                 item = self.schedule_table.item(row, 1 + area_idx)
                 areas_active.append(item.checkState() == Qt.Checked if item else False)
 
-            interval_item = self.schedule_table.item(row, 4)
-            cooldown_item = self.schedule_table.item(row, 5)
+            interval_item = self.schedule_table.item(row, 1 + NUM_AREAS)
+            cooldown_item = self.schedule_table.item(row, 2 + NUM_AREAS)
 
             try:
                 interval = int(interval_item.text()) if interval_item else 30
@@ -1058,7 +1109,7 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.check_schedule()
 
     def schedule_toggle_area(self, area_index, checked):
-        for row in range(96):
+        for row in range(SCHEDULE_BLOCKS):
             item = self.schedule_table.item(row, 1 + area_index)
             if item:
                 item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
@@ -1296,8 +1347,11 @@ class ScreenCapturePatternDetector(QMainWindow):
         screen = QApplication.primaryScreen()
         screenshot = screen.grabWindow(
             0, region.x(), region.y(), region.width(), region.height())
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"screenshot_area{area_index + 1}_{timestamp}.png"
+        if self.save_files_checkbox.isChecked():
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            filename = f"screenshot_area{area_index + 1}_{timestamp}.png"
+        else:
+            filename = f"_temp_area{area_index + 1}.png"
         filepath = os.path.join(self.screenshot_folder, filename)
         screenshot.save(filepath)
         return filepath
@@ -1440,8 +1494,11 @@ class ScreenCapturePatternDetector(QMainWindow):
                 ax.set_title(f'Area {area_idx + 1}: {status}', color=color, fontweight='bold')
                 ax.axis('off')
 
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            output_path = os.path.join(self.output_folder, f"detection_{timestamp}.png")
+            if self.save_files_checkbox.isChecked():
+                timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                output_path = os.path.join(self.output_folder, f"detection_{timestamp}.png")
+            else:
+                output_path = os.path.join(self.output_folder, "_temp_detection.png")
             plt.tight_layout()
             plt.savefig(output_path, dpi=100, bbox_inches='tight')
             plt.close(fig)
@@ -1457,18 +1514,20 @@ class ScreenCapturePatternDetector(QMainWindow):
 
     def perform_hotkey(self, hotkey):
         try:
+            delay = self.hotkey_delay_input.value()
             if self.browser_hotkey_mode.isChecked():
-                self._perform_hotkey_win32(hotkey)
+                self._perform_hotkey_win32(hotkey, delay)
                 self.log_message(f"Hotkey performed (Win32/browser mode): {hotkey}")
             else:
-                pyautogui.hotkey(*hotkey.split('+'))
+                keys = [k.strip() for k in hotkey.split('+')]
+                pyautogui.hotkey(*keys, interval=delay)
                 self.log_message(f"Hotkey performed (pyautogui): {hotkey}")
             self.start_cooldown_timer()
         except Exception as e:
             self.log_message(f"Error performing hotkey {hotkey}: {str(e)}")
             self._log_error_to_file(f"perform_hotkey error: {str(e)}\n{traceback.format_exc()}")
 
-    def _perform_hotkey_win32(self, hotkey):
+    def _perform_hotkey_win32(self, hotkey, delay=0.1):
         """Send hotkey via Windows keybd_event API with scan codes for browser compatibility."""
         user32 = ctypes.windll.user32
 
@@ -1508,7 +1567,7 @@ class ScreenCapturePatternDetector(QMainWindow):
             scan = user32.MapVirtualKeyW(vk, 0)
             user32.keybd_event(vk, scan, 0, 0)
 
-        time.sleep(0.05)
+        time.sleep(max(0.05, delay))
 
         # Release all keys in reverse
         for vk in reversed(vk_codes):
@@ -1524,6 +1583,8 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.settings.setValue('neglect_matched', self.neglect_matched.isChecked())
         self.settings.setValue('cooldown_timer', self.cooldown_timer_input.value())
         self.settings.setValue('browser_hotkey', self.browser_hotkey_mode.isChecked())
+        self.settings.setValue('hotkey_delay', self.hotkey_delay_input.value())
+        self.settings.setValue('save_files', self.save_files_checkbox.isChecked())
         self.saveData()
         QMessageBox.information(self, "Settings Saved", "Your settings have been saved.")
 
