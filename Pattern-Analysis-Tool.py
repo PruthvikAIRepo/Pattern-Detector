@@ -20,6 +20,7 @@ import ctypes
 import threading
 import time
 import traceback
+import winsound
 
 import matplotlib
 matplotlib.use('Agg')
@@ -572,6 +573,10 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.hotkey_delay_input.setDecimals(1)
         self.hotkey_delay_input.setValue(self.settings.value('hotkey_delay', 0.1, type=float))
         hotkey_layout.addRow("Key Press Delay (sec):", self.hotkey_delay_input)
+
+        self.sound_alert_checkbox = QCheckBox("Play 3 beeps when hotkey fires")
+        self.sound_alert_checkbox.setChecked(self.settings.value('sound_alert', True, type=bool))
+        hotkey_layout.addRow("Sound Alert:", self.sound_alert_checkbox)
 
         settings_main_layout.addWidget(hotkey_group)
 
@@ -1523,9 +1528,18 @@ class ScreenCapturePatternDetector(QMainWindow):
                 pyautogui.hotkey(*keys, interval=delay)
                 self.log_message(f"Hotkey performed (pyautogui): {hotkey}")
             self.start_cooldown_timer()
+            if self.sound_alert_checkbox.isChecked():
+                threading.Thread(target=self._play_beeps, daemon=True).start()
         except Exception as e:
             self.log_message(f"Error performing hotkey {hotkey}: {str(e)}")
             self._log_error_to_file(f"perform_hotkey error: {str(e)}\n{traceback.format_exc()}")
+
+    def _play_beeps(self):
+        try:
+            for _ in range(3):
+                winsound.Beep(750, 200)
+        except Exception:
+            pass
 
     def _perform_hotkey_win32(self, hotkey, delay=0.1):
         """Send hotkey via Windows keybd_event API with scan codes for browser compatibility."""
@@ -1585,6 +1599,7 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.settings.setValue('browser_hotkey', self.browser_hotkey_mode.isChecked())
         self.settings.setValue('hotkey_delay', self.hotkey_delay_input.value())
         self.settings.setValue('save_files', self.save_files_checkbox.isChecked())
+        self.settings.setValue('sound_alert', self.sound_alert_checkbox.isChecked())
         self.saveData()
         QMessageBox.information(self, "Settings Saved", "Your settings have been saved.")
 
