@@ -9,8 +9,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QTextEdit, QPlainTextEdit, QTimeEdit, QTableWidget, QTableWidgetItem, QHeaderView,
                              QSystemTrayIcon, QMenu, QAction, QComboBox)
 from PyQt5.QtCore import (Qt, QTimer, QRect, pyqtSignal, QSettings, QMetaObject, Q_ARG,
-                           pyqtSlot, QTime, QDateTime)
-from PyQt5.QtGui import QPixmap, QPainter, QColor, QIcon, QFont, QPalette
+                           pyqtSlot, QTime, QDateTime, QEvent)
+from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QIcon, QFont, QPalette, QCursor
 import cv2
 import numpy as np
 from skimage.metrics import structural_similarity as ssim
@@ -93,6 +93,7 @@ class ScreenCapturePatternDetector(QMainWindow):
 
         self.current_selecting_area = 0
         self.last_displayed_image = None
+        self._area_highlighter = None
         self.capture_in_progress = False
         self.capture_interval = 0
         self.timer = QTimer(self)
@@ -298,6 +299,8 @@ class ScreenCapturePatternDetector(QMainWindow):
             if self.areas[i]["region"] is not None:
                 r = self.areas[i]["region"]
                 label.setText(f"{r.width()}x{r.height()}")
+                label.setCursor(QCursor(Qt.PointingHandCursor))
+            label.installEventFilter(self)
             row.addWidget(label)
 
             checkbox = QCheckBox("Active")
@@ -670,6 +673,31 @@ class ScreenCapturePatternDetector(QMainWindow):
             self._update_area_status(i)
 
     # ──────────────────────────────────────────────
+    #  Area highlight on hover
+    # ──────────────────────────────────────────────
+
+    def eventFilter(self, obj, event):
+        if obj in self.area_labels:
+            idx = self.area_labels.index(obj)
+            if event.type() == QEvent.Enter and self.areas[idx]["region"] is not None:
+                self._show_area_highlight(idx)
+            elif event.type() == QEvent.Leave:
+                self._hide_area_highlight()
+        return super().eventFilter(obj, event)
+
+    def _show_area_highlight(self, area_index):
+        self._hide_area_highlight()
+        region = self.areas[area_index]["region"]
+        if region:
+            self._area_highlighter = AreaHighlighter(region, area_index)
+            self._area_highlighter.show()
+
+    def _hide_area_highlight(self):
+        if hasattr(self, '_area_highlighter') and self._area_highlighter:
+            self._area_highlighter.close()
+            self._area_highlighter = None
+
+    # ──────────────────────────────────────────────
     #  Data persistence
     # ──────────────────────────────────────────────
 
@@ -917,6 +945,7 @@ class ScreenCapturePatternDetector(QMainWindow):
         idx = self.current_selecting_area
         self.areas[idx]["region"] = rect
         self.area_labels[idx].setText(f"{rect.width()}x{rect.height()}")
+        self.area_labels[idx].setCursor(QCursor(Qt.PointingHandCursor))
         self.status_label.setText(f"Area {idx + 1} selected: {rect.width()}x{rect.height()}")
         self.saveData()
         self.show()
@@ -1679,6 +1708,7 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.display_image(self.last_displayed_image)
 
     def closeEvent(self, event):
+        self._hide_area_highlight()
         if hasattr(self, 'cooldown_update_timer'):
             self.cooldown_update_timer.stop()
         if hasattr(self, 'schedule_timer'):
@@ -1729,6 +1759,53 @@ class AreaSelector(QWidget):
         if rect.width() > 0 and rect.height() > 0:
             self.areaSelected.emit(rect)
         self.close()
+
+
+class AreaHighlighter(QWidget):
+    """Transparent overlay that highlights a screen region."""
+
+    COLORS = [
+        QColor(0, 255, 0, 60),    # Area 1: green
+        QColor(42, 130, 218, 60), # Area 2: blue
+        QColor(255, 165, 0, 60),  # Area 3: orange
+        QColor(180, 0, 255, 60),  # Area 4: purple
+        QColor(0, 255, 255, 60),  # Area 5: cyan
+    ]
+    BORDER_COLORS = [
+        QColor(0, 255, 0),
+        QColor(42, 130, 218),
+        QColor(255, 165, 0),
+        QColor(180, 0, 255),
+        QColor(0, 255, 255),
+    ]
+
+    def __init__(self, rect, area_index):
+        super().__init__()
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setGeometry(rect.x() - 3, rect.y() - 3, rect.width() + 6, rect.height() + 6)
+        self.area_index = min(area_index, len(self.COLORS) - 1)
+        self.area_width = rect.width()
+        self.area_height = rect.height()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setPen(QPen(self.BORDER_COLORS[self.area_index], 3))
+        painter.setBrush(self.COLORS[self.area_index])
+        painter.drawRect(3, 3, self.width() - 6, self.height() - 6)
+
+        # Label with dimensions
+        label = f"Area {self.area_index + 1}  ({self.area_width}x{self.area_height})"
+        painter.setFont(QFont("Arial", 11, QFont.Bold))
+        text_rect = painter.fontMetrics().boundingRect(label)
+        bg_rect = QRect(6, 4, text_rect.width() + 12, text_rect.height() + 8)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 180))
+        painter.drawRect(bg_rect)
+        painter.setPen(self.BORDER_COLORS[self.area_index])
+        painter.drawText(12, 4 + text_rect.height() + 1, label)
 
 
 if __name__ == '__main__':
