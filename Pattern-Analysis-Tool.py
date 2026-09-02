@@ -94,6 +94,8 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.current_selecting_area = 0
         self.last_displayed_image = None
         self._area_highlighter = None
+        self.target_window_handle = None
+        self._my_hwnd = None
         self.capture_in_progress = False
         self.capture_interval = 0
         self.timer = QTimer(self)
@@ -126,6 +128,12 @@ class ScreenCapturePatternDetector(QMainWindow):
         # Scheduler engine timer
         self.schedule_timer = QTimer(self)
         self.schedule_timer.timeout.connect(self.check_schedule)
+
+        # Track foreground window to know where to send hotkeys
+        self._my_hwnd = int(self.winId())
+        self._fg_tracker = QTimer(self)
+        self._fg_tracker.timeout.connect(self._track_foreground_window)
+        self._fg_tracker.start(500)
 
         # If schedule was enabled on last close, start it
         if self.schedule_enabled:
@@ -360,6 +368,10 @@ class ScreenCapturePatternDetector(QMainWindow):
         button_layout.addWidget(self.pause_capture_button)
 
         capture_settings_layout.addRow(button_layout)
+
+        self.target_window_label = QLabel("Click on your target app — it will be tracked automatically")
+        self.target_window_label.setStyleSheet("color: #999999;")
+        capture_settings_layout.addRow("Target Window:", self.target_window_label)
 
         self.pause_duration_input = QSpinBox()
         self.pause_duration_input.setRange(1, 3600)
@@ -696,6 +708,36 @@ class ScreenCapturePatternDetector(QMainWindow):
         if hasattr(self, '_area_highlighter') and self._area_highlighter:
             self._area_highlighter.close()
             self._area_highlighter = None
+
+    # ──────────────────────────────────────────────
+    #  Target window tracking
+    # ──────────────────────────────────────────────
+
+    def _track_foreground_window(self):
+        """Continuously track the foreground window. When user focuses another app, remember it."""
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        if hwnd and hwnd != self._my_hwnd:
+            self.target_window_handle = hwnd
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length > 0:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = buf.value[:40]
+                self.target_window_label.setText(title)
+                self.target_window_label.setStyleSheet("color: #00cc00;")
+
+    def _focus_target_window(self):
+        """Refocus the last known external window before sending hotkey."""
+        if self.target_window_handle:
+            user32 = ctypes.windll.user32
+            if user32.IsWindow(self.target_window_handle):
+                user32.SetForegroundWindow(self.target_window_handle)
+                time.sleep(0.05)
+                return True
+            else:
+                self.target_window_handle = None
+        return False
 
     # ──────────────────────────────────────────────
     #  Data persistence
@@ -1548,6 +1590,9 @@ class ScreenCapturePatternDetector(QMainWindow):
 
     def perform_hotkey(self, hotkey):
         try:
+            # Refocus target window before sending hotkey
+            self._focus_target_window()
+
             delay = self.hotkey_delay_input.value()
             if self.browser_hotkey_mode.isChecked():
                 self._perform_hotkey_win32(hotkey, delay)
@@ -1709,6 +1754,8 @@ class ScreenCapturePatternDetector(QMainWindow):
 
     def closeEvent(self, event):
         self._hide_area_highlight()
+        if hasattr(self, '_fg_tracker'):
+            self._fg_tracker.stop()
         if hasattr(self, 'cooldown_update_timer'):
             self.cooldown_update_timer.stop()
         if hasattr(self, 'schedule_timer'):
