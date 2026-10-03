@@ -4,3 +4,5 @@ __pycache__/
 venv/
 build/
 dist/
+docs/commercial-plan/
+.claude/settings.local.json

@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QLabel, QLineEdit, QPushButton, QFileDialog, QListWidget,
                              QInputDialog, QMessageBox, QScrollArea, QTabWidget, QGroupBox,
                              QFormLayout, QSpinBox, QDoubleSpinBox, QCheckBox, QProgressBar,
-                             QTextEdit, QPlainTextEdit, QTimeEdit, QTableWidget, QTableWidgetItem, QHeaderView,
+                             QPlainTextEdit, QTimeEdit, QTableWidget, QTableWidgetItem, QHeaderView,
                              QSystemTrayIcon, QMenu, QAction, QComboBox)
 from PyQt5.QtCore import (Qt, QTimer, QRect, pyqtSignal, QSettings, QMetaObject, Q_ARG,
                            pyqtSlot, QTime, QDateTime, QEvent)
@@ -34,10 +34,8 @@ SCHEDULE_BLOCKS = (24 * 60) // SCHEDULE_BLOCK_MINUTES  # 144
 
 class ScreenCapturePatternDetector(QMainWindow):
 
-    update_progress = pyqtSignal(int)
     update_status = pyqtSignal(str)
     start_cooldown_signal = pyqtSignal(int)
-    update_cooldown_label_signal = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -95,13 +93,11 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.last_displayed_image = None
         self._area_highlighter = None
         self.target_window_handle = None
-        self._my_hwnd = None
         self.capture_in_progress = False
         self.capture_interval = 0
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.capture_and_detect)
 
-        self.update_progress.connect(self.set_progress_bar_value)
         self.update_status.connect(self.set_status_label_text)
 
         self.cooldown_timer = QTimer(self)
@@ -115,7 +111,6 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.in_cooldown = False
 
         self.start_cooldown_signal.connect(self.start_cooldown_timer_main_thread)
-        self.update_cooldown_label_signal.connect(self.update_cooldown_label)
 
         self.progress_timer = QTimer(self)
         self.progress_timer.timeout.connect(self.update_progress_bar)
@@ -1733,9 +1728,6 @@ class ScreenCapturePatternDetector(QMainWindow):
         QMetaObject.invokeMethod(self.log_text, "appendPlainText",
                                  Qt.QueuedConnection,
                                  Q_ARG(str, log_entry))
-
-    def set_progress_bar_value(self, value):
-        self.progress_bar.setValue(value)
 
     def set_status_label_text(self, text):
         self.status_label.setText(text)
