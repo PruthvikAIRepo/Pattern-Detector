@@ -30,6 +30,40 @@ APP_NAME = "PatternHawk"
 NUM_AREAS = 5
 SCHEDULE_BLOCK_MINUTES = 10
 SCHEDULE_BLOCKS = (24 * 60) // SCHEDULE_BLOCK_MINUTES  # 144
+HOTKEY_MODIFIERS = ('ctrl', 'alt', 'shift', 'win')
+
+# Virtual-key codes the browser-compatible (Win32) hotkey mode can send
+WIN32_VK_CODES = {
+    'alt': 0x12, 'ctrl': 0x11, 'shift': 0x10, 'win': 0x5B,
+    'enter': 0x0D, 'return': 0x0D, 'tab': 0x09, 'escape': 0x1B, 'esc': 0x1B,
+    'space': 0x20, 'backspace': 0x08, 'delete': 0x2E, 'del': 0x2E,
+    'up': 0x26, 'down': 0x28, 'left': 0x25, 'right': 0x27,
+    'home': 0x24, 'end': 0x23, 'pageup': 0x21, 'pagedown': 0x22,
+    'insert': 0x2D, 'printscreen': 0x2C,
+    'f1': 0x70, 'f2': 0x71, 'f3': 0x72, 'f4': 0x73,
+    'f5': 0x74, 'f6': 0x75, 'f7': 0x76, 'f8': 0x77,
+    'f9': 0x78, 'f10': 0x79, 'f11': 0x7A, 'f12': 0x7B,
+    '0': 0x30, '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34,
+    '5': 0x35, '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39,
+}
+# VK codes for A-Z are 0x41-0x5A
+WIN32_VK_CODES.update({chr(c): c - 32 for c in range(ord('a'), ord('z') + 1)})
+
+
+def normalize_hotkey(text):
+    """Canonical hotkey string so 'Alt + B' and 'alt+b' compare equal.
+
+    Lowercase, no spaces, modifiers first: 'shift+ctrl+A' -> 'ctrl+shift+a'.
+    """
+    keys = [k.strip().lower() for k in (text or '').split('+')]
+    keys = [k for k in keys if k]
+    modifiers = [m for m in HOTKEY_MODIFIERS if m in keys]
+    return '+'.join(modifiers + [k for k in keys if k not in HOTKEY_MODIFIERS])
+
+
+def unknown_hotkey_keys(hotkey):
+    """Key names in a normalized hotkey that cannot be pressed (typos such as 'atl')."""
+    return [k for k in hotkey.split('+') if not pyautogui.isValidKey(k)]
 
 
 class ScreenCapturePatternDetector(QMainWindow):
@@ -109,6 +143,7 @@ class ScreenCapturePatternDetector(QMainWindow):
 
         self.cooldown_end_time = None
         self.in_cooldown = False
+        self._last_block_reason = None
 
         self.start_cooldown_signal.connect(self.start_cooldown_timer_main_thread)
 
@@ -452,6 +487,10 @@ class ScreenCapturePatternDetector(QMainWindow):
             add_btn.clicked.connect(lambda checked, idx=i: self.addTemplate(idx))
             controls.addWidget(add_btn)
 
+            edit_btn = QPushButton("Edit Hotkey")
+            edit_btn.clicked.connect(lambda checked, idx=i: self.editTemplateHotkey(idx))
+            controls.addWidget(edit_btn)
+
             del_btn = QPushButton("Delete Template")
             del_btn.clicked.connect(lambda checked, idx=i: self.deleteTemplate(idx))
             controls.addWidget(del_btn)
@@ -460,14 +499,14 @@ class ScreenCapturePatternDetector(QMainWindow):
 
             template_list = QListWidget()
             template_list.setMaximumHeight(130)
+            template_list.itemDoubleClicked.connect(lambda item, idx=i: self.editTemplateHotkey(idx))
             group_layout.addWidget(template_list)
 
             templates_layout.addWidget(group)
             self.template_lists.append(template_list)
             self.template_set_combos.append(combo)
 
-        for i in range(NUM_AREAS):
-            self.updateTemplateList(i)
+        self._refresh_template_lists()
 
     def _setup_scheduler_tab(self):
         scheduler_tab = QWidget()
@@ -571,7 +610,10 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.global_hotkey_input = QLineEdit()
         self.global_hotkey_input.setText(self.global_hotkey)
         self.global_hotkey_input.setPlaceholderText("e.g., ctrl+shift+a")
-        hotkey_layout.addRow("Global Hotkey:", self.global_hotkey_input)
+        hotkey_layout.addRow("Default Hotkey:", self.global_hotkey_input)
+        default_hotkey_hint = QLabel("Used by templates that have no hotkey of their own")
+        default_hotkey_hint.setStyleSheet("color: #999999;")
+        hotkey_layout.addRow("", default_hotkey_hint)
 
         self.browser_hotkey_mode = QCheckBox("Enable for Chrome/browser-based apps")
         self.browser_hotkey_mode.setChecked(self.settings.value('browser_hotkey', False, type=bool))
@@ -775,7 +817,8 @@ class ScreenCapturePatternDetector(QMainWindow):
 
             elif isinstance(data, list):
                 self.areas[0]["templates"] = [
-                    {"path": t["path"], "similarity": t["similarity"]} for t in data
+                    {"path": t["path"], "similarity": t["similarity"],
+                     "hotkey": normalize_hotkey(t.get("hotkey", ""))} for t in data
                 ]
                 if data and "hotkey" in data[0]:
                     self.global_hotkey = data[0]["hotkey"]
@@ -833,11 +876,35 @@ class ScreenCapturePatternDetector(QMainWindow):
                 self, "Similarity Threshold",
                 "Enter similarity threshold (0-1):", 0.8, 0, 1, 2)
             if ok:
-                area["templates"].append({"path": filePath, "similarity": similarity})
+                hotkey = self._ask_template_hotkey("Template Hotkey")
+                if hotkey is None:
+                    return  # User cancelled
+                area["templates"].append(
+                    {"path": filePath, "similarity": similarity, "hotkey": hotkey})
                 self.updateTemplateList(area_index)
                 self.saveData()
                 self.status_label.setText(
                     f"Template added to Area {area_index + 1}: {os.path.basename(filePath)}")
+
+    def editTemplateHotkey(self, area_index):
+        template_list = self.template_lists[area_index]
+        currentRow = template_list.currentRow()
+        if currentRow == -1:
+            QMessageBox.information(self, "No Template Selected",
+                                    "Select a template from the list first.")
+            return
+
+        template = self.areas[area_index]["templates"][currentRow]
+        hotkey = self._ask_template_hotkey(
+            "Edit Hotkey", normalize_hotkey(template.get('hotkey', '')))
+        if hotkey is None:
+            return  # User cancelled
+        template['hotkey'] = hotkey
+        self.updateTemplateList(area_index)
+        template_list.setCurrentRow(currentRow)
+        self.saveData()
+        self.status_label.setText(
+            f"Hotkey updated in Area {area_index + 1}: {os.path.basename(template['path'])}")
 
     def deleteTemplate(self, area_index):
         template_list = self.template_lists[area_index]
@@ -854,7 +921,87 @@ class ScreenCapturePatternDetector(QMainWindow):
         for i, template in enumerate(self.areas[area_index]["templates"]):
             file_name = os.path.basename(template['path'])
             template_list.addItem(
-                f"{i + 1}. {file_name} (Confidence: {template['similarity']})")
+                f"{i + 1}. {file_name} (Confidence: {template['similarity']}, "
+                f"Hotkey: {self._hotkey_label(template)})")
+
+    def _refresh_template_lists(self):
+        for i in range(NUM_AREAS):
+            self.updateTemplateList(i)
+
+    # ──────────────────────────────────────────────
+    #  Template hotkeys
+    # ──────────────────────────────────────────────
+
+    def effective_hotkey(self, template):
+        """The hotkey a template calls for: its own, or the Default Hotkey if it has none."""
+        return (normalize_hotkey(template.get('hotkey', ''))
+                or normalize_hotkey(self.global_hotkey))
+
+    def _hotkey_label(self, template):
+        if normalize_hotkey(template.get('hotkey', '')):
+            return self.effective_hotkey(template)
+        default = normalize_hotkey(self.global_hotkey)
+        return f"{default} (default)" if default else "not set"
+
+    def _ask_template_hotkey(self, title, current=""):
+        """Ask for a template's hotkey. Returns it normalized, '' to use the Default
+        Hotkey, or None if the user cancelled."""
+        default = normalize_hotkey(self.global_hotkey)
+        prompt = "Enter hotkey (e.g., alt+b):"
+        if default:
+            prompt += f"\nLeave blank to use the Default Hotkey ({default})."
+
+        while True:
+            text, ok = QInputDialog.getText(self, title, prompt, text=current)
+            if not ok:
+                return None
+            hotkey = normalize_hotkey(text)
+            if not hotkey and not default:
+                QMessageBox.warning(self, "Invalid Input",
+                                    "Hotkey cannot be empty. Please try again.")
+                continue
+            problem = self._key_problem(hotkey) if hotkey else None
+            if problem:
+                QMessageBox.warning(
+                    self, "Invalid Hotkey",
+                    f"'{hotkey}' cannot be used: {problem}.\n"
+                    "Use key names like alt+b or ctrl+shift+a.")
+                current = text
+                continue
+            return hotkey
+
+    def _key_problem(self, hotkey):
+        """Why a normalized hotkey cannot be pressed as typed, or None if it can.
+
+        Both hotkey senders skip a key they do not know, which would press only part
+        of the combination, so such a hotkey is never accepted and never fired.
+        """
+        unknown = unknown_hotkey_keys(hotkey)
+        if unknown:
+            return f"unknown key {', '.join(unknown)}"
+        if self.browser_hotkey_mode.isChecked():
+            unsupported = [k for k in hotkey.split('+') if k not in WIN32_VK_CODES]
+            if unsupported:
+                return f"Browser-compatible mode cannot press {', '.join(unsupported)}"
+        return None
+
+    def _hotkey_problem(self, areas):
+        """Why a template in the given (index, area) pairs cannot fire a hotkey, or None."""
+        for area_index, area in areas:
+            for template in area["templates"]:
+                name = os.path.basename(template['path'])
+                hotkey = self.effective_hotkey(template)
+                if not hotkey:
+                    return (f"Area {area_index + 1} template '{name}' has no hotkey.\n"
+                            "Use Edit Hotkey on the Templates tab, or set a Default "
+                            "Hotkey in Settings.")
+                problem = self._key_problem(hotkey)
+                if problem:
+                    return (f"Area {area_index + 1} template '{name}' has hotkey "
+                            f"'{hotkey}': {problem}.\n"
+                            "Fix it with Edit Hotkey on the Templates tab, or in the "
+                            "Default Hotkey in Settings.")
+        return None
 
     # ──────────────────────────────────────────────
     #  Template Sets (save / load / delete)
@@ -1000,12 +1147,15 @@ class ScreenCapturePatternDetector(QMainWindow):
 
         if self.schedule_enabled:
             self.global_hotkey = self.global_hotkey_input.text().strip()
-            if not self.global_hotkey:
-                QMessageBox.warning(self, "Error",
-                                    "Set a Global Hotkey in Settings before enabling the schedule.")
+            problem = self._hotkey_problem(
+                [(i, a) for i, a in enumerate(self.areas)
+                 if a["region"] is not None and a["templates"]])
+            if problem:
+                QMessageBox.warning(self, "Error", problem)
                 self.schedule_enable_checkbox.setChecked(False)
                 self.schedule_enabled = False
                 return
+            self._refresh_template_lists()
 
             self.save_schedule_from_table()
 
@@ -1196,7 +1346,7 @@ class ScreenCapturePatternDetector(QMainWindow):
             return
 
         active_areas = [
-            a for a in self.areas
+            (i, a) for i, a in enumerate(self.areas)
             if a["active"] and a["region"] is not None and len(a["templates"]) > 0
         ]
         if not active_areas:
@@ -1205,10 +1355,11 @@ class ScreenCapturePatternDetector(QMainWindow):
             return
 
         self.global_hotkey = self.global_hotkey_input.text().strip()
-        if not self.global_hotkey:
-            QMessageBox.warning(self, "Error",
-                                "Please set a Global Hotkey in the Settings tab.")
+        problem = self._hotkey_problem(active_areas)
+        if problem:
+            QMessageBox.warning(self, "Error", problem)
             return
+        self._refresh_template_lists()
 
         minutes = self.capture_minutes_input.value()
         seconds = self.capture_seconds_input.value()
@@ -1271,6 +1422,7 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.status_label.setText("Capture stopped")
         self._update_window_title("Idle")
         self._reset_area_statuses()
+        self._last_block_reason = None
         self.log_message("Capture stopped by user.")
 
     def _set_area_buttons_enabled(self, enabled):
@@ -1353,7 +1505,7 @@ class ScreenCapturePatternDetector(QMainWindow):
                 self.status_label.setText(status_text)
 
     # ──────────────────────────────────────────────
-    #  Capture & Detection (multi-area + AND logic)
+    #  Capture & Detection (multi-area AND + hotkey agreement)
     # ──────────────────────────────────────────────
 
     def capture_and_detect(self):
@@ -1366,18 +1518,21 @@ class ScreenCapturePatternDetector(QMainWindow):
         try:
             area_results = {}
             area_matched_data = {}
+            hotkey_calls = []  # (area number, template file, hotkey) for every match
 
             for i, area in enumerate(self.areas):
                 if not area["active"] or area["region"] is None or not area["templates"]:
                     continue
 
                 screenshot = self.capture_screen(area["region"], i)
-                matched, patterns = self.detect_pattern_for_area(
+                matched, patterns, neglected = self.detect_pattern_for_area(
                     screenshot, area["templates"], area["neglect_count"])
 
                 area_results[i] = matched
                 if patterns:
                     area_matched_data[i] = (patterns, screenshot)
+                for path, hotkey in [(p[3], p[5]) for p in patterns] + neglected:
+                    hotkey_calls.append((i + 1, os.path.basename(path), hotkey))
 
                 # Update status indicator on main thread
                 QMetaObject.invokeMethod(
@@ -1390,22 +1545,48 @@ class ScreenCapturePatternDetector(QMainWindow):
                 return
 
             all_matched = all(area_results.values())
+            block_reason = None
 
-            if all_matched and not self.in_cooldown:
-                # Neglect only the templates that fire the hotkey. Marking every match
-                # (fired or not) put areas out of step and the AND condition never met.
-                for i, (patterns, _) in area_matched_data.items():
-                    for pattern in patterns:
-                        self.areas[i]["neglect_count"][pattern[3]] = 1
-                self.log_message("ALL areas matched! Hotkey executed: " + self.global_hotkey)
-                self.perform_hotkey(self.global_hotkey)
-                status_msg = f"All {len(area_results)} area(s) matched. Hotkey executed: {self.global_hotkey}"
-            elif all_matched and self.in_cooldown:
-                status_msg = f"All areas matched. Hotkey skipped (cooldown active)."
-            else:
+            if not all_matched:
                 matched_areas = [i + 1 for i, m in area_results.items() if m]
                 unmatched_areas = [i + 1 for i, m in area_results.items() if not m]
                 status_msg = f"Matched: Area {matched_areas}, No match: Area {unmatched_areas}."
+            else:
+                # Every matched template must call for the same hotkey
+                hotkeys = {key for _, _, key in hotkey_calls}
+                hotkey = next(iter(hotkeys)) if len(hotkeys) == 1 else None
+                key_problem = self._key_problem(hotkey) if hotkey else None
+                if '' in hotkeys:
+                    names = ", ".join(f"Area {a} {name}"
+                                      for a, name, key in hotkey_calls if not key)
+                    block_reason = f"No action: matched template has no hotkey ({names})."
+                    status_msg = "All areas matched but a template has no hotkey. No action."
+                elif hotkey is None:
+                    detail = " | ".join(f"Area {a} {name}: {key}"
+                                        for a, name, key in hotkey_calls)
+                    block_reason = f"No action: hotkeys disagree. {detail}"
+                    status_msg = (f"All areas matched but hotkeys disagree "
+                                  f"({' vs '.join(sorted(hotkeys))}). No action.")
+                elif key_problem:
+                    # The hotkey changed after Start. Pressing it would send only part of it.
+                    block_reason = f"No action: hotkey '{hotkey}' cannot be pressed ({key_problem})."
+                    status_msg = f"All areas matched but hotkey '{hotkey}' cannot be pressed. No action."
+                elif self.in_cooldown:
+                    status_msg = "All areas matched. Hotkey skipped (cooldown active)."
+                else:
+                    # Neglect only the templates that fire the hotkey. Marking every match
+                    # (fired or not) put areas out of step and the AND condition never met.
+                    for i, (patterns, _) in area_matched_data.items():
+                        for pattern in patterns:
+                            self.areas[i]["neglect_count"][pattern[3]] = 1
+                    self.log_message(f"ALL areas matched! Hotkey executed: {hotkey}")
+                    self.perform_hotkey(hotkey)
+                    status_msg = f"All {len(area_results)} area(s) matched. Hotkey executed: {hotkey}"
+
+            # Log a blocked hotkey once, not on every cycle it stays blocked
+            if block_reason and block_reason != self._last_block_reason:
+                self.log_message(block_reason)
+            self._last_block_reason = block_reason
 
             self.update_status.emit(status_msg)
 
@@ -1439,20 +1620,25 @@ class ScreenCapturePatternDetector(QMainWindow):
             stock_chart = cv2.imread(screenshot_path)
             if stock_chart is None:
                 self.log_message(f"Warning: Could not read screenshot {screenshot_path}")
-                return (False, [])
+                return (False, [], [])
             stock_chart_rgb = cv2.cvtColor(stock_chart, cv2.COLOR_BGR2RGB)
 
             all_matched_patterns = []
+            neglected_calls = []  # (template path, hotkey)
 
             for template in templates:
                 template_path = template['path']
 
+                # A template that just fired the hotkey cannot trigger again this cycle.
+                # It is still checked: while it keeps matching, its hotkey has to agree
+                # with everything else that matched before any hotkey may fire.
+                neglected = False
                 if (neglect_matched and template_path in neglect_count
                         and neglect_count[template_path] > 0):
                     neglect_count[template_path] -= 1
                     if neglect_count[template_path] == 0:
                         del neglect_count[template_path]
-                    continue
+                    neglected = True
 
                 pattern_img = cv2.imread(template_path)
                 if pattern_img is None:
@@ -1485,6 +1671,11 @@ class ScreenCapturePatternDetector(QMainWindow):
 
                 if (best_match_score >= template['similarity']
                         and best_match_loc is not None):
+                    hotkey = self.effective_hotkey(template)
+                    if neglected:
+                        neglected_calls.append((template_path, hotkey))
+                        continue
+
                     x, y = best_match_loc
                     h, w = best_match_shape[:2]
                     roi = stock_chart_rgb[y:y + h, x:x + w]
@@ -1509,13 +1700,13 @@ class ScreenCapturePatternDetector(QMainWindow):
 
                     all_matched_patterns.append(
                         (best_match_loc, best_match_shape, combined,
-                         template_path, best_match_scale))
+                         template_path, best_match_scale, hotkey))
 
-            return (len(all_matched_patterns) > 0, all_matched_patterns)
+            return (len(all_matched_patterns) > 0, all_matched_patterns, neglected_calls)
 
         except Exception as e:
             self.log_message(f"Error in pattern detection: {str(e)}")
-            return (False, [])
+            return (False, [], [])
 
     def calculate_ssim(self, img1, img2):
         min_dim = min(img1.shape[0], img1.shape[1], img2.shape[0], img2.shape[1])
@@ -1552,13 +1743,15 @@ class ScreenCapturePatternDetector(QMainWindow):
                         score = pattern[2]
                         tmpl_path = pattern[3]
                         scale = pattern[4]
+                        hotkey = pattern[5]
 
                         rect = plt.Rectangle(
                             (x, y), w, h, edgecolor='lime', facecolor='none', linewidth=2)
                         ax.add_patch(rect)
                         ax.text(x, y - 5,
                                 f'{os.path.basename(tmpl_path)}\n'
-                                f'Score: {score:.3f} | Scale: {scale:.2f}',
+                                f'Score: {score:.3f} | Scale: {scale:.2f} | '
+                                f'Key: {hotkey or "not set"}',
                                 color='lime', fontsize=7,
                                 bbox=dict(boxstyle='round,pad=0.2',
                                           facecolor='black', alpha=0.7))
@@ -1617,30 +1810,13 @@ class ScreenCapturePatternDetector(QMainWindow):
         """Send hotkey via Windows keybd_event API with scan codes for browser compatibility."""
         user32 = ctypes.windll.user32
 
-        VK_MAP = {
-            'alt': 0x12, 'ctrl': 0x11, 'shift': 0x10, 'win': 0x5B,
-            'enter': 0x0D, 'return': 0x0D, 'tab': 0x09, 'escape': 0x1B, 'esc': 0x1B,
-            'space': 0x20, 'backspace': 0x08, 'delete': 0x2E, 'del': 0x2E,
-            'up': 0x26, 'down': 0x28, 'left': 0x25, 'right': 0x27,
-            'home': 0x24, 'end': 0x23, 'pageup': 0x21, 'pagedown': 0x22,
-            'insert': 0x2D, 'printscreen': 0x2C,
-            'f1': 0x70, 'f2': 0x71, 'f3': 0x72, 'f4': 0x73,
-            'f5': 0x74, 'f6': 0x75, 'f7': 0x76, 'f8': 0x77,
-            'f9': 0x78, 'f10': 0x79, 'f11': 0x7A, 'f12': 0x7B,
-            '0': 0x30, '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34,
-            '5': 0x35, '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39,
-        }
-        # Add a-z
-        for c in range(ord('a'), ord('z') + 1):
-            VK_MAP[chr(c)] = c - 32  # VK codes for A-Z are 0x41-0x5A
-
         KEYEVENTF_KEYUP = 0x0002
 
         keys = [k.strip().lower() for k in hotkey.split('+')]
         vk_codes = []
 
         for key in keys:
-            vk = VK_MAP.get(key)
+            vk = WIN32_VK_CODES.get(key)
             if vk is None and len(key) == 1:
                 vk = ord(key.upper())
             if vk is None:
@@ -1665,6 +1841,15 @@ class ScreenCapturePatternDetector(QMainWindow):
     # ──────────────────────────────────────────────
 
     def save_settings(self):
+        default_hotkey = normalize_hotkey(self.global_hotkey_input.text())
+        problem = self._key_problem(default_hotkey) if default_hotkey else None
+        if problem:
+            QMessageBox.warning(
+                self, "Invalid Hotkey",
+                f"Default Hotkey '{default_hotkey}' cannot be used: {problem}.\n"
+                "Use key names like alt+b or ctrl+shift+a.")
+            return
+
         self.global_hotkey = self.global_hotkey_input.text().strip()
         self.settings.setValue('neglect_matched', self.neglect_matched.isChecked())
         self.settings.setValue('cooldown_timer', self.cooldown_timer_input.value())
@@ -1673,6 +1858,7 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.settings.setValue('save_files', self.save_files_checkbox.isChecked())
         self.settings.setValue('sound_alert', self.sound_alert_checkbox.isChecked())
         self.saveData()
+        self._refresh_template_lists()
         QMessageBox.information(self, "Settings Saved", "Your settings have been saved.")
 
     def reset_process(self):
@@ -1694,6 +1880,7 @@ class ScreenCapturePatternDetector(QMainWindow):
 
             self.capture_in_progress = False
             self.in_cooldown = False
+            self._last_block_reason = None
             self.elapsed_time = 0
             self.cooldown_end_time = None
             self.current_block_index = -1
