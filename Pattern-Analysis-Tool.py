@@ -594,7 +594,7 @@ class ScreenCapturePatternDetector(QMainWindow):
         detection_group = QGroupBox("Detection Settings")
         detection_layout = QFormLayout(detection_group)
 
-        self.neglect_matched = QCheckBox("Skip templates matched in previous cycle")
+        self.neglect_matched = QCheckBox("Skip a template for one cycle after it fires the hotkey")
         self.neglect_matched.setChecked(self.settings.value('neglect_matched', True, type=bool))
         detection_layout.addRow("Neglect Matched:", self.neglect_matched)
 
@@ -1392,6 +1392,11 @@ class ScreenCapturePatternDetector(QMainWindow):
             all_matched = all(area_results.values())
 
             if all_matched and not self.in_cooldown:
+                # Neglect only the templates that fire the hotkey. Marking every match
+                # (fired or not) put areas out of step and the AND condition never met.
+                for i, (patterns, _) in area_matched_data.items():
+                    for pattern in patterns:
+                        self.areas[i]["neglect_count"][pattern[3]] = 1
                 self.log_message("ALL areas matched! Hotkey executed: " + self.global_hotkey)
                 self.perform_hotkey(self.global_hotkey)
                 status_msg = f"All {len(area_results)} area(s) matched. Hotkey executed: {self.global_hotkey}"
@@ -1505,8 +1510,6 @@ class ScreenCapturePatternDetector(QMainWindow):
                     all_matched_patterns.append(
                         (best_match_loc, best_match_shape, combined,
                          template_path, best_match_scale))
-
-                    neglect_count[template_path] = 1
 
             return (len(all_matched_patterns) > 0, all_matched_patterns)
 
