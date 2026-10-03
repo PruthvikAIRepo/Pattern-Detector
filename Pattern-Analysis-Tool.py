@@ -27,6 +27,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 APP_NAME = "PatternHawk"
+APP_VERSION = "1.7.0"  # shown in the title bar; bump with every release
 NUM_AREAS = 5
 SCHEDULE_BLOCK_MINUTES = 10
 SCHEDULE_BLOCKS = (24 * 60) // SCHEDULE_BLOCK_MINUTES  # 144
@@ -73,7 +74,7 @@ class ScreenCapturePatternDetector(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME} — Idle")
+        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION} — Idle")
         self.setGeometry(100, 100, 1000, 800)
 
         self.icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'PatternHawk.png')
@@ -231,12 +232,8 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.close()
 
     def _update_window_title(self, status=None):
-        if status:
-            self.setWindowTitle(f"{APP_NAME} — {status}")
-            self.tray_icon.setToolTip(f"{APP_NAME} — {status}")
-        else:
-            self.setWindowTitle(f"{APP_NAME} — Idle")
-            self.tray_icon.setToolTip(f"{APP_NAME} — Idle")
+        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION} — {status or 'Idle'}")
+        self.tray_icon.setToolTip(f"{APP_NAME} — {status or 'Idle'}")
 
     def _log_error_to_file(self, error_msg):
         try:
