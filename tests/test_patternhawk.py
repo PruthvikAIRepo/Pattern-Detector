@@ -692,6 +692,21 @@ class CaptureControlTests(PatternHawkTestCase):
         self.pump(1.5)
         self.assert_not_capturing()
 
+    def test_reset_cancels_delayed_start(self):
+        self.window.delay_timer.setTime(ph.QTime(0, 0, 1))
+        self.window.start_capture()
+        with mock.patch.object(ph.QMessageBox, "question", lambda *a, **kw: ph.QMessageBox.Yes):
+            self.window.reset_process()
+        self.pump(1.5)
+        self.assert_not_capturing()
+
+    def test_enabling_schedule_cancels_delayed_start(self):
+        self.window.delay_timer.setTime(ph.QTime(0, 0, 1))
+        self.window.start_capture()
+        self.window.schedule_enable_checkbox.setChecked(True)  # no block has an active area
+        self.pump(1.5)
+        self.assert_not_capturing()
+
     def test_delayed_start_still_starts(self):
         self.window.delay_timer.setTime(ph.QTime(0, 0, 1))
         self.window.start_capture()
