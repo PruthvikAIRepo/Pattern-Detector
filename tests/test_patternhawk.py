@@ -15,6 +15,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -604,6 +606,158 @@ class StartGateTests(PatternHawkTestCase):
         self.assertTrue(self.window.schedule_enabled)
         self.window.schedule_enable_checkbox.setChecked(False)
         self.assertEqual(self.warnings, [])
+
+
+class CaptureControlTests(PatternHawkTestCase):
+    """Start / Pause / Stop / Reset against the real timers. Cycles are not run."""
+
+    def setUp(self):
+        super().setUp()
+        w = self.make_window(areas=[both_directions()])
+        w._capture_and_detect_thread = lambda: None
+        w.capture_seconds_input.setValue(30)
+        w.pause_duration_input.setValue(1)  # the shortest pause the UI allows
+        self.resumes = 0
+
+        def counting_resume():
+            self.resumes += 1
+            w.resume_capture()
+        w.pause_timer.timeout.disconnect()
+        w.pause_timer.timeout.connect(counting_resume)
+        self.addCleanup(self.stop_timers)
+
+    def stop_timers(self):
+        for timer in (self.window.timer, self.window.progress_timer, self.window.pause_timer,
+                      self.window.countdown_timer, self.window.schedule_timer):
+            timer.stop()
+
+    def pump(self, seconds):
+        """Let the event loop run so timers can fire."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+
+    def assert_not_capturing(self):
+        self.assertFalse(self.window.capture_in_progress)
+        self.assertFalse(self.window.timer.isActive())
+
+    def test_pause_resumes_once(self):
+        # Regression: the resume timer repeated forever, restarting the capture timer each
+        # time, so a capture interval longer than the pause never fired again.
+        self.window.start_capture()
+        self.window.pause_capture()
+        self.assert_not_capturing()
+        self.pump(2.4)
+        self.assertEqual(self.resumes, 1)
+        self.assertTrue(self.window.capture_in_progress)
+        self.assertTrue(self.window.timer.isActive())
+
+    def test_stop_cancels_pending_resume(self):
+        self.window.start_capture()
+        self.window.pause_capture()
+        self.window.stop_capture()
+        self.pump(1.4)
+        self.assertEqual(self.resumes, 0)
+        self.assert_not_capturing()
+
+    def test_stop_sticks_after_pausing_twice(self):
+        # Regression: every Pause left a timer behind that restarted capture after Stop.
+        self.window.start_capture()
+        self.window.pause_capture()
+        self.pump(1.2)
+        self.window.pause_capture()
+        self.pump(1.2)
+        self.assertEqual(self.resumes, 2)
+        self.window.stop_capture()
+        self.pump(1.4)
+        self.assertEqual(self.resumes, 2)
+        self.assert_not_capturing()
+
+    def test_reset_cancels_pending_resume(self):
+        self.window.start_capture()
+        self.window.pause_capture()
+        with mock.patch.object(ph.QMessageBox, "question", lambda *a, **kw: ph.QMessageBox.Yes):
+            self.window.reset_process()
+        self.pump(1.4)
+        self.assertEqual(self.resumes, 0)
+        self.assert_not_capturing()
+
+    def test_stop_cancels_delayed_start(self):
+        # Regression: Stop during the Delay Start countdown did not cancel the start.
+        self.window.delay_timer.setTime(ph.QTime(0, 0, 1))
+        self.window.start_capture()
+        self.assertTrue(self.window.countdown_timer.isActive())
+        self.window.stop_capture()
+        self.pump(1.5)
+        self.assert_not_capturing()
+
+    def test_delayed_start_still_starts(self):
+        self.window.delay_timer.setTime(ph.QTime(0, 0, 1))
+        self.window.start_capture()
+        self.assert_not_capturing()
+        self.pump(1.5)
+        self.assertTrue(self.window.capture_in_progress)
+        self.assertTrue(self.window.timer.isActive())
+
+    def test_enabling_schedule_cancels_pending_resume(self):
+        self.window.start_capture()
+        self.window.pause_capture()
+        self.window.schedule_enable_checkbox.setChecked(True)  # no block has an active area
+        self.assertTrue(self.window.schedule_enabled)
+        self.pump(1.4)
+        self.assertEqual(self.resumes, 0)
+        self.assert_not_capturing()
+
+
+class CycleOverlapTests(PatternHawkTestCase):
+    """A check that outlasts the capture interval must not run alongside the next one."""
+
+    def test_tick_is_skipped_while_previous_cycle_runs(self):
+        self.make_window(areas=[both_directions()])
+        self.window.neglect_matched.setChecked(False)
+        entered, release = threading.Event(), threading.Event()
+        captures = []
+
+        def slow_capture(region, i):
+            captures.append(i)
+            entered.set()
+            release.wait(10)
+            return FIX.bull_scene
+        self.window.capture_screen = slow_capture
+
+        first = threading.Thread(target=self.window._capture_and_detect_thread)
+        first.start()
+        self.assertTrue(entered.wait(10))
+
+        self.window._capture_and_detect_thread()  # the next two ticks arrive meanwhile
+        self.window._capture_and_detect_thread()
+        self.assertEqual(captures, [0])
+        self.assertEqual(self.sent, [])
+
+        release.set()
+        first.join(10)
+        app.processEvents()
+        self.assertEqual(self.sent, ["alt+b"])  # pressed once, not once per tick
+        self.assertEqual(sum("Skipped a check" in line for line in self.logs), 1)
+
+        # The finished cycle frees the way for the next one.
+        self.window.reset_cooldown()
+        self.assertEqual(self.cycle(FIX.bull_scene), ["alt+b"])
+
+    def test_failed_cycle_does_not_block_later_cycles(self):
+        self.make_window(areas=[both_directions()])
+        working_capture = self.window.capture_screen
+
+        def broken_capture(region, i):
+            raise RuntimeError("capture failed")
+        self.window.capture_screen = broken_capture
+        self.window._capture_and_detect_thread()
+        self.assertEqual(self.logs, ["Error during capture and detect: capture failed"])
+
+        self.logs.clear()
+        self.window.capture_screen = working_capture
+        self.assertEqual(self.cycle(FIX.bull_scene), ["alt+b"])
 
 
 class VisualizationTests(PatternHawkTestCase):

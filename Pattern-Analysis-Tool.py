@@ -144,6 +144,8 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.cooldown_end_time = None
         self.in_cooldown = False
         self._last_block_reason = None
+        self._cycle_lock = threading.Lock()  # one detection cycle at a time
+        self._overlap_logged = False
 
         self.start_cooldown_signal.connect(self.start_cooldown_timer_main_thread)
 
@@ -154,6 +156,10 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.countdown_timer = QTimer(self)
         self.countdown_timer.timeout.connect(self.update_countdown)
         self.remaining_delay = 0
+
+        self.pause_timer = QTimer(self)
+        self.pause_timer.setSingleShot(True)
+        self.pause_timer.timeout.connect(self.resume_capture)
 
         # Scheduler engine timer
         self.schedule_timer = QTimer(self)
@@ -1159,6 +1165,10 @@ class ScreenCapturePatternDetector(QMainWindow):
 
             self.save_schedule_from_table()
 
+            # The schedule takes over: drop a pending manual resume or delayed start
+            self.pause_timer.stop()
+            self.countdown_timer.stop()
+
             self.start_capture_button.setEnabled(False)
             self.stop_capture_button.setEnabled(False)
             self.pause_capture_button.setEnabled(False)
@@ -1411,8 +1421,9 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.capture_in_progress = False
         self.timer.stop()
         self.progress_timer.stop()
-        if hasattr(self, 'pause_timer'):
-            self.pause_timer.stop()
+        # A pending resume or delayed start would otherwise start capture again
+        self.pause_timer.stop()
+        self.countdown_timer.stop()
 
         self.start_capture_button.setEnabled(True)
         self.stop_capture_button.setEnabled(False)
@@ -1423,6 +1434,7 @@ class ScreenCapturePatternDetector(QMainWindow):
         self._update_window_title("Idle")
         self._reset_area_statuses()
         self._last_block_reason = None
+        self._overlap_logged = False
         self.log_message("Capture stopped by user.")
 
     def _set_area_buttons_enabled(self, enabled):
@@ -1463,8 +1475,6 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.timer.stop()
             self.progress_timer.stop()
             self.pause_duration = self.pause_duration_input.value()
-            self.pause_timer = QTimer(self)
-            self.pause_timer.timeout.connect(self.resume_capture)
             self.pause_timer.start(self.pause_duration * 1000)
             self.status_label.setText(f"Capture paused for {self.pause_duration} seconds")
             self.pause_capture_button.setEnabled(False)
@@ -1515,6 +1525,15 @@ class ScreenCapturePatternDetector(QMainWindow):
         self.progress_bar.setValue(0)
 
     def _capture_and_detect_thread(self):
+        # One cycle at a time. A cycle that outlasts the capture interval must not overlap
+        # the next: both could fire, or press keys while the other is still pressing.
+        if not self._cycle_lock.acquire(blocking=False):
+            if not self._overlap_logged:
+                self._overlap_logged = True
+                self.log_message("Skipped a check because the previous one was still running. "
+                                 "If this slows detection, use a longer capture interval.")
+            return
+
         try:
             area_results = {}
             area_matched_data = {}
@@ -1595,6 +1614,8 @@ class ScreenCapturePatternDetector(QMainWindow):
 
         except Exception as e:
             self.log_message(f"Error during capture and detect: {str(e)}")
+        finally:
+            self._cycle_lock.release()
 
     @pyqtSlot(int, bool)
     def _update_area_status_slot(self, area_index, matched):
@@ -1870,6 +1891,8 @@ class ScreenCapturePatternDetector(QMainWindow):
         if reply == QMessageBox.Yes:
             self.timer.stop()
             self.progress_timer.stop()
+            self.pause_timer.stop()
+            self.countdown_timer.stop()
             self.cooldown_timer.stop()
             self.cooldown_update_timer.stop()
 
@@ -1881,6 +1904,7 @@ class ScreenCapturePatternDetector(QMainWindow):
             self.capture_in_progress = False
             self.in_cooldown = False
             self._last_block_reason = None
+            self._overlap_logged = False
             self.elapsed_time = 0
             self.cooldown_end_time = None
             self.current_block_index = -1
