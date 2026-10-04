@@ -9,6 +9,7 @@ images. It never captures the screen and never sends a keystroke: screen capture
 key injection, window focus and the beep are replaced with recorders, settings go
 to an in-memory stand-in for the registry, and app data goes to a temp folder.
 """
+import ctypes
 import importlib.util
 import json
 import os
@@ -25,6 +26,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import cv2
 import numpy as np
+from PyQt5.QtCore import QPoint, QPointF
+from PyQt5.QtGui import QWheelEvent
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -161,6 +164,7 @@ class PatternHawkTestCase(unittest.TestCase):
         """Run one capture cycle with one scene per area. Returns the hotkeys it sent."""
         self.scenes = dict(enumerate(scenes))
         before = len(self.sent)
+        self.window.capture_in_progress = True  # a check only acts while capture is running
         self.window._capture_and_detect_thread()
         app.processEvents()
         self.assertEqual([m for m in self.logs if m.startswith("Error")], [])
@@ -192,6 +196,21 @@ class HotkeyStringTests(unittest.TestCase):
         self.assertEqual(ph.normalize_hotkey(""), "")
         self.assertEqual(ph.normalize_hotkey("   "), "")
         self.assertEqual(ph.normalize_hotkey(None), "")
+
+    def test_normalize_survives_a_non_text_value(self):
+        # A hand-edited data file can hold anything in the hotkey field.
+        self.assertEqual(ph.normalize_hotkey(5), "5")
+        self.assertEqual(ph.normalize_hotkey(["alt", "b"]), "['alt', 'b']")
+
+    def test_stray_plus_is_noticed(self):
+        for text in ["alt+", "ctrl++a", "+b", "+", "alt + + b"]:
+            self.assertTrue(ph.has_stray_plus(text), text)
+        for text in ["alt+b", "Alt + B", "b", "ctrl+shift+f5"]:
+            self.assertFalse(ph.has_stray_plus(text), text)
+
+    def test_corner_fail_safe_is_off(self):
+        # pyautogui would otherwise refuse to press anything while the mouse is in a corner.
+        self.assertFalse(ph.pyautogui.FAILSAFE)
 
     def test_unknown_keys_flags_typos(self):
         self.assertEqual(ph.unknown_hotkey_keys("alt+b"), [])
@@ -337,6 +356,108 @@ class AgreementGateTests(PatternHawkTestCase):
         self.window.browser_hotkey_mode.setChecked(False)
         self.assertEqual(self.cycle(FIX.bull_scene), ["alt+f13"])
 
+    def test_bare_modifier_is_never_sent(self):
+        # A bare Alt would put the trading platform into menu mode.
+        self.make_window(areas=[area(template(FIX.bull, "alt"))])
+        self.assertEqual(self.cycle(FIX.bull_scene), [])
+        self.assertIn("No action: hotkey 'alt' cannot be pressed "
+                      "(it needs a key besides ctrl, alt, shift or win).", self.logs)
+
+    def test_every_area_is_captured_before_any_detection(self):
+        # Detection takes seconds per area. The gates must compare screens from one moment.
+        w = self.make_window(areas=[both_directions(), both_directions()])
+        order = []
+        detect = w.detect_pattern_for_area
+
+        def capture(region, i):
+            order.append(f"capture {i + 1}")
+            return FIX.bull_scene
+
+        def recording_detect(*args):
+            order.append("detect")
+            return detect(*args)
+        w.capture_screen = capture
+        w.detect_pattern_for_area = recording_detect
+        self.assertEqual(self.cycle(), ["alt+b"])
+        self.assertEqual(order, ["capture 1", "capture 2", "detect", "detect"])
+
+    def test_failed_send_is_not_reported_as_executed(self):
+        self.make_window(areas=[both_directions()])
+        self.scenes = {0: FIX.bull_scene}
+        self.window.capture_in_progress = True
+        with mock.patch.object(ph.pyautogui, "hotkey", side_effect=RuntimeError("blocked")):
+            self.window._capture_and_detect_thread()
+            app.processEvents()
+        self.assertIn("could not be sent", self.status())
+        self.assertIn("Error performing hotkey alt+b: blocked", self.logs)
+        self.assertNotIn("ALL areas matched! Hotkey executed: alt+b", self.logs)
+        self.assertFalse(self.window.in_cooldown)
+
+        # Nothing was pressed, so the template does not sit out: the next check tries again.
+        self.logs.clear()
+        self.assertEqual(self.cycle(FIX.bull_scene), ["alt+b"])
+        self.assertIn("ALL areas matched! Hotkey executed: alt+b", self.logs)
+
+
+class StoppedMidCheckTests(PatternHawkTestCase):
+    """Detection takes seconds. A check still running when capture stops must not press."""
+
+    def setUp(self):
+        super().setUp()
+        w = self.make_window(areas=[both_directions()])
+        w.neglect_matched.setChecked(False)
+        w.capture_seconds_input.setValue(30)
+        w.capture_in_progress = True
+        self.scenes = {0: FIX.bull_scene}
+        self.detecting, self.go_on = threading.Event(), threading.Event()
+        detect = w.detect_pattern_for_area
+
+        def slow_detect(*args):
+            result = detect(*args)
+            self.detecting.set()
+            self.go_on.wait(10)
+            return result
+        w.detect_pattern_for_area = slow_detect
+        self.addCleanup(w.pause_timer.stop)
+
+        self.check = threading.Thread(target=w._capture_and_detect_thread)
+        self.check.start()
+        self.assertTrue(self.detecting.wait(10))  # the pattern is found; the press is next
+
+    def finish_check(self):
+        self.go_on.set()
+        self.check.join(10)
+        app.processEvents()
+        return self.sent
+
+    def test_check_presses_when_nothing_stops_it(self):
+        self.assertEqual(self.finish_check(), ["alt+b"])
+
+    def test_stop(self):
+        self.window.stop_capture()
+        self.assertEqual(self.finish_check(), [])
+        self.assertEqual(self.status(), "Capture stopped")
+        self.assertEqual([line for line in self.logs if "Hotkey" in line], [])
+
+    def test_pause(self):
+        self.window.pause_capture()
+        self.assertEqual(self.finish_check(), [])
+        self.assertIn("Capture paused", self.status())
+
+    def test_reset(self):
+        with mock.patch.object(ph.QMessageBox, "question", lambda *a, **kw: ph.QMessageBox.Yes):
+            self.window.reset_process()
+        self.assertEqual(self.finish_check(), [])
+
+    def test_closing_the_window(self):
+        self.window.close()
+        self.assertEqual(self.finish_check(), [])
+        self.assertFalse(self.window.timer.isActive())
+
+    def test_schedule_moving_to_another_block(self):
+        self.window.current_block_index += 1
+        self.assertEqual(self.finish_check(), [])
+
 
 class Win32SenderTests(PatternHawkTestCase):
 
@@ -443,6 +564,20 @@ class TemplateHotkeyUiTests(PatternHawkTestCase):
                       self.warnings[0])
         self.assertEqual(self.window.areas[0]["templates"][0]["hotkey"], "alt+b")
 
+    def test_add_template_rejects_stray_plus_and_bare_modifier(self):
+        self.make_window(default_hotkey="alt+b", areas=[])
+        ask = self.add_template(("alt+", True), ("ctrl++a", True), ("+", True),
+                                ("ctrl + shift", True), ("altleft", True), ("alt+s", True))
+        self.assertEqual(ask.call_count, 6)
+        self.assertEqual([w.splitlines()[0] for w in self.warnings], [
+            "'alt+' cannot be used: a key is missing next to a +.",
+            "'ctrl++a' cannot be used: a key is missing next to a +.",
+            "'+' cannot be used: a key is missing next to a +.",
+            "'ctrl + shift' cannot be used: it needs a key besides ctrl, alt, shift or win.",
+            "'altleft' cannot be used: it needs a key besides ctrl, alt, shift or win.",
+        ])
+        self.assertEqual(self.window.areas[0]["templates"][0]["hotkey"], "alt+s")
+
     def test_add_template_requires_hotkey_when_no_default(self):
         self.make_window(areas=[])
         ask = self.add_template(("", True), ("alt+s", True))
@@ -494,6 +629,34 @@ class TemplateHotkeyUiTests(PatternHawkTestCase):
         self.assertIn("Default Hotkey 'atl+b' cannot be used: unknown key atl.", self.warnings[0])
         self.assertEqual(self.window.global_hotkey, "alt+b")
         self.assertEqual(self.saved()["global_hotkey"], "alt+b")
+
+    def test_settings_reject_stray_plus_and_bare_modifier(self):
+        self.make_window(default_hotkey="alt+b", areas=[both_directions()])
+        for text, reason in [("ctrl++", "a key is missing next to a +"),
+                             ("alt", "it needs a key besides ctrl, alt, shift or win")]:
+            self.window.global_hotkey_input.setText(text)
+            self.window.save_settings()
+            self.assertIn(f"Default Hotkey '{text}' cannot be used: {reason}.", self.warnings[-1])
+            self.assertEqual(self.window.global_hotkey, "alt+b")
+        self.assertEqual(self.saved()["global_hotkey"], "alt+b")
+
+    def test_mouse_wheel_cannot_load_a_template_set(self):
+        # The Templates tab scrolls. A wheel turn with the cursor over the dropdown used to
+        # replace the area's templates and hotkeys, with no question asked.
+        self.make_window(areas=[both_directions(), area(template(FIX.bull, "alt+b"))])
+        with mock.patch.object(ph.QInputDialog, "getText", lambda *a, **kw: ("day", True)):
+            self.window.save_template_set(0)
+        combo = self.window.template_set_combos[1]
+        for delta in (-120, 120):
+            wheel = QWheelEvent(QPointF(5, 5), QPointF(5, 5), QPoint(0, 0), QPoint(0, delta),
+                                ph.Qt.NoButton, ph.Qt.NoModifier, ph.Qt.NoScrollPhase, False)
+            app.sendEvent(combo, wheel)
+            self.assertFalse(wheel.isAccepted())  # left for the page to scroll
+        self.assertEqual(combo.currentIndex(), 0)
+        self.assertEqual(self.window.areas[1]["templates"], [template(FIX.bull, "alt+b")])
+
+        combo.setCurrentIndex(1)  # choosing a set on purpose still works
+        self.assertEqual([t["hotkey"] for t in self.window.areas[1]["templates"]], ["alt+b", "alt+s"])
 
     def test_settings_accept_blank_default_hotkey(self):
         self.make_window(default_hotkey="alt+b", areas=[both_directions()])
@@ -612,6 +775,25 @@ class PersistenceTests(PatternHawkTestCase):
         self.window.areas[0]["region"] = ph.QRect(0, 0, 240, 120)
         self.assertEqual(self.cycle(FIX.bear_scene), ["ctrl+s"])
 
+    def test_failed_save_keeps_the_previous_file(self):
+        self.make_window(areas=[both_directions()])
+        before = self.saved()
+        self.window.global_hotkey = "alt+x"
+        with mock.patch.object(ph.json, "dump", side_effect=OSError("disk full")):
+            self.window.saveData()
+        self.assertEqual(self.saved(), before)  # still complete and readable
+        self.assertEqual(self.logs, ["Error saving data: disk full"])
+
+        self.window.saveData()
+        self.assertEqual(self.saved()["global_hotkey"], "alt+x")
+        self.assertFalse(os.path.exists(self.data_file + ".tmp"))
+
+    def test_hotkey_field_with_a_number_does_not_crash_the_launch(self):
+        hand_edited = area(template(FIX.bull))
+        hand_edited["templates"][0]["hotkey"] = 5
+        self.make_window(areas=[hand_edited])
+        self.assertEqual(self.list_rows(0), ["1. bull.png (Confidence: 0.8, Hotkey: 5)"])
+
     def test_hotkeys_survive_save_and_reload(self):
         self.make_window(areas=[both_directions()])
         self.window.saveData()
@@ -649,6 +831,34 @@ class StartGateTests(PatternHawkTestCase):
         self.assertFalse(self.start())
         self.assertIn("has hotkey 'alt+f13': Browser-compatible mode cannot press f13.",
                       self.warnings[0])
+
+    def test_start_blocked_on_bare_modifier(self):
+        self.make_window(areas=[area(template(FIX.bull, "alt"))])
+        self.assertFalse(self.start())
+        self.assertIn("Area 1 template 'bull.png' has hotkey 'alt': "
+                      "it needs a key besides ctrl, alt, shift or win.", self.warnings[0])
+
+    def test_start_blocked_when_template_image_is_missing(self):
+        # A missing image never matches, so it could not veto the opposite signal.
+        gone = os.path.join(FIX.root, "moved_away.png")
+        self.make_window(areas=[area(template(FIX.bull, "alt+b"), template(gone, "alt+s"))])
+        self.assertFalse(self.start())
+        self.assertIn("Area 1 template 'moved_away.png' cannot be found:", self.warnings[0])
+
+    def test_blocked_start_keeps_the_working_default_hotkey(self):
+        self.make_window(default_hotkey="alt+b", areas=[area(template(FIX.bull))])
+        self.window.global_hotkey_input.setText("atl+b")  # typed in Settings, not saved
+        self.assertFalse(self.start())
+        self.assertEqual(self.window.global_hotkey, "alt+b")
+        self.window.saveData()
+        self.assertEqual(self.saved()["global_hotkey"], "alt+b")
+        self.assertEqual(self.cycle(FIX.bull_scene), ["alt+b"])
+
+    def test_start_uses_default_hotkey_typed_but_not_saved(self):
+        self.make_window(areas=[area(template(FIX.bull))])
+        self.window.global_hotkey_input.setText("Alt + S")
+        self.assertTrue(self.start())
+        self.assertEqual(self.cycle(FIX.bull_scene), ["alt+s"])
 
     def test_start_allowed_without_default_when_templates_have_hotkeys(self):
         self.make_window(areas=[both_directions()])
@@ -791,12 +1001,129 @@ class CaptureControlTests(PatternHawkTestCase):
         self.assert_not_capturing()
 
 
+class ScheduleControlTests(PatternHawkTestCase):
+    """Turning the schedule on and off around a manual capture."""
+
+    def setUp(self):
+        super().setUp()
+        # Area 2 is inactive, so manual Start ignores its template, which has no hotkey.
+        # Enable Schedule checks every area and therefore refuses.
+        w = self.make_window(areas=[both_directions(), area(template(FIX.bull), active=False)])
+        w._capture_and_detect_thread = lambda: None
+        w.capture_seconds_input.setValue(30)
+        self.addCleanup(self.stop_timers)
+
+    def stop_timers(self):
+        for timer in (self.window.timer, self.window.progress_timer, self.window.pause_timer,
+                      self.window.countdown_timer, self.window.schedule_timer):
+            timer.stop()
+
+    def refused_enable(self):
+        self.window.schedule_enable_checkbox.setChecked(True)
+        self.assertFalse(self.window.schedule_enabled)
+        self.assertFalse(self.window.schedule_enable_checkbox.isChecked())
+        self.assertFalse(self.window.schedule_timer.isActive())
+        self.assertIn("Area 2 template 'bull.png' has no hotkey.", self.warnings[-1])
+
+    def test_refused_enable_leaves_a_running_capture_alone(self):
+        self.window.start_capture()
+        self.refused_enable()
+        self.assertTrue(self.window.capture_in_progress)
+        self.assertTrue(self.window.timer.isActive())
+        self.assertTrue(self.window.stop_capture_button.isEnabled())
+        self.assertFalse(self.window.start_capture_button.isEnabled())
+        self.assertNotEqual(self.status(), "Ready (manual mode)")
+
+    def test_refused_enable_leaves_a_paused_capture_alone(self):
+        self.window.start_capture()
+        self.window.pause_capture()
+        self.refused_enable()
+        self.assertTrue(self.window.pause_timer.isActive())
+        self.assertTrue(self.window.stop_capture_button.isEnabled())
+        self.assertIn("Capture paused", self.status())
+
+    def test_refused_enable_leaves_a_delayed_start_alone(self):
+        self.window.delay_timer.setTime(ph.QTime(0, 0, 30))
+        self.window.start_capture()
+        self.refused_enable()
+        self.assertTrue(self.window.countdown_timer.isActive())
+        self.assertTrue(self.window.stop_capture_button.isEnabled())
+
+    def test_refused_enable_does_not_save_an_unsaved_default_hotkey(self):
+        before = self.saved()
+        self.window.global_hotkey_input.setText("atl+b")
+        self.window.schedule_enable_checkbox.setChecked(True)
+        self.assertFalse(self.window.schedule_enabled)
+        self.assertIn("unknown key atl", self.warnings[-1])
+        self.assertEqual(self.window.global_hotkey, "")
+        self.assertEqual(self.saved(), before)
+
+    def test_tray_stop_while_scheduled_switches_the_schedule_off(self):
+        # Stop used to leave the schedule on, so the next block started capture again.
+        self.window.areas[1]["templates"][0]["hotkey"] = "alt+b"
+        self.window.schedule_toggle_area(0, True)  # Area 1 active in every block
+        self.window.schedule_enable_checkbox.setChecked(True)
+        self.assertTrue(self.window.schedule_enabled)
+        self.assertTrue(self.window.capture_in_progress)
+
+        self.window.stop_capture()  # what the tray's Stop Capture calls
+        self.assertFalse(self.window.schedule_enabled)
+        self.assertFalse(self.window.schedule_enable_checkbox.isChecked())
+        self.assertFalse(self.window.capture_in_progress)
+        self.assertFalse(self.saved()["schedule_enabled"])
+
+        self.window.save_schedule_from_table()
+        self.window.check_schedule()
+        self.assertFalse(self.window.capture_in_progress)
+        self.assertFalse(self.window.timer.isActive())
+        self.assertTrue(self.window.start_capture_button.isEnabled())
+
+    def test_launch_with_schedule_on_locks_the_manual_controls(self):
+        self.make_window(data={"global_hotkey": "alt+b", "areas": [both_directions()],
+                               "schedule_enabled": True})
+        self.assertTrue(self.window.schedule_enabled)
+        self.assertFalse(self.window.start_capture_button.isEnabled())
+        self.assertFalse(self.window.capture_seconds_input.isEnabled())
+        self.assertEqual([cb.isEnabled() for cb in self.window.area_active_checkboxes],
+                         [False] * ph.NUM_AREAS)
+
+
+class TargetWindowTests(PatternHawkTestCase):
+    """Hotkeys go to the last window the user had in front that is not PatternHawk's."""
+
+    def test_own_dialogs_never_become_the_target(self):
+        w = self.make_window(areas=[])
+        w._fg_tracker.stop()
+        with mock.patch.object(ph.ctypes.windll.user32, "GetForegroundWindow", lambda: 4242):
+            w._is_own_window = lambda hwnd: False  # another application is in front
+            w._track_foreground_window()
+            self.assertEqual(w.target_window_handle, 4242)
+
+            w.target_window_handle = 1111
+            w._is_own_window = lambda hwnd: True  # one of our dialogs is in front
+            w._track_foreground_window()
+            self.assertEqual(w.target_window_handle, 1111)
+
+    def test_own_window_check_goes_by_the_owning_process(self):
+        w = self.make_window(areas=[])
+        user32 = ctypes.WinDLL("user32")
+        user32.CreateWindowExW.restype = ctypes.c_void_p
+        user32.DestroyWindow.argtypes = [ctypes.c_void_p]
+        ours = user32.CreateWindowExW(0, "STATIC", "patternhawk-test", 0, 0, 0, 0, 0,
+                                      None, None, None, None)  # never shown
+        self.assertTrue(ours)
+        self.addCleanup(user32.DestroyWindow, ours)
+        self.assertTrue(w._is_own_window(ours))
+        self.assertFalse(w._is_own_window(user32.GetShellWindow()))  # the Windows desktop
+
+
 class CycleOverlapTests(PatternHawkTestCase):
     """A check that outlasts the capture interval must not run alongside the next one."""
 
     def test_tick_is_skipped_while_previous_cycle_runs(self):
         self.make_window(areas=[both_directions()])
         self.window.neglect_matched.setChecked(False)
+        self.window.capture_in_progress = True
         entered, release = threading.Event(), threading.Event()
         captures = []
 
@@ -824,6 +1151,38 @@ class CycleOverlapTests(PatternHawkTestCase):
 
         # The finished cycle frees the way for the next one.
         self.window.reset_cooldown()
+        self.assertEqual(self.cycle(FIX.bull_scene), ["alt+b"])
+
+    def test_stuck_cycle_does_not_block_detection_for_good(self):
+        self.make_window(areas=[both_directions()])
+        self.window.neglect_matched.setChecked(False)
+        self.window.capture_in_progress = True
+        working_capture = self.window.capture_screen
+        entered, release = threading.Event(), threading.Event()
+
+        def stuck_capture(region, i):
+            entered.set()
+            release.wait(10)
+            return FIX.bull_scene
+        self.window.capture_screen = stuck_capture
+        stuck = threading.Thread(target=self.window._capture_and_detect_thread)
+        stuck.start()
+        self.assertTrue(entered.wait(10))
+        self.window.capture_screen = working_capture
+
+        with mock.patch.object(ph, "CYCLE_STUCK_SECONDS", 0.3):
+            self.assertEqual(self.cycle(FIX.bull_scene), [])  # not stuck yet: skipped
+            time.sleep(0.4)
+            self.assertEqual(self.cycle(FIX.bull_scene), ["alt+b"])  # given up on: carry on
+        self.assertEqual(sum("looks stuck" in line for line in self.logs), 1)
+
+        # The stuck cycle wakes up late with a stale screenshot. It must not press anything,
+        # even though nothing else (cooldown) would stop it.
+        self.window.reset_cooldown()
+        release.set()
+        stuck.join(10)
+        app.processEvents()
+        self.assertEqual(self.sent, ["alt+b"])
         self.assertEqual(self.cycle(FIX.bull_scene), ["alt+b"])
 
     def test_failed_cycle_does_not_block_later_cycles(self):
