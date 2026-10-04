@@ -35,12 +35,15 @@ This lets you load bullish and bearish templates side by side: whichever directi
 
 The result of the last check is drawn at the bottom of the Capture tab, with a box around each match and the hotkey it called for. The Logs tab says why a hotkey was or was not pressed.
 
+Stop, Pause and Reset take effect at once: a check that is still running when you press them does not press the hotkey afterwards. Closing the window quits PatternHawk.
+
 ### Hotkeys
 
 Write keys joined with `+`, for example `alt+b`, `ctrl+shift+a` or `f5`. Capitals and spaces do not matter: `Alt + B` is the same as `alt+b`. A capital letter does not add Shift; if the hotkey needs Shift, write it out, as in `alt+shift+b`.
 
 - A template with no hotkey of its own uses the **Default Hotkey** from the Settings tab.
-- PatternHawk refuses a key name it cannot press (a typo such as `atl+b`), so it never presses half a hotkey.
+- PatternHawk refuses a key name it cannot press (a typo such as `atl+b`), so it never presses half a hotkey. For the same reason a hotkey needs a key besides Ctrl, Alt, Shift or Win, and a dangling `+` (`alt+`) is not accepted.
+- Start Capture also checks that every template image is still where it was. A missing image can never match, so it is reported instead of being skipped quietly.
 - **Browser-compatible** mode (Settings) is for platforms that run inside Chrome or another browser. It supports letters, digits, F1 to F12, and Enter, Tab, Esc, Space, Backspace, Delete, Insert, Home, End, Page Up/Down and the arrow keys.
 
 ### Template sets
@@ -49,7 +52,7 @@ Write keys joined with `+`, for example `alt+b`, `ctrl+shift+a` or `f5`. Capital
 
 ### Scheduler
 
-The Scheduler tab splits the day into 10-minute blocks. For each block you choose which areas are active, the capture interval and the cooldown. With *Enable Schedule* ticked PatternHawk follows the table by itself and the manual Start/Stop controls are switched off. A block with no active areas pauses capturing.
+The Scheduler tab splits the day into 10-minute blocks. For each block you choose which areas are active, the capture interval and the cooldown. With *Enable Schedule* ticked PatternHawk follows the table by itself and the manual Start/Stop controls are switched off. A block with no active areas pauses capturing. *Stop Capture* in the tray menu switches the schedule off as well, so capturing does not start again at the next block.
 
 ### Settings
 

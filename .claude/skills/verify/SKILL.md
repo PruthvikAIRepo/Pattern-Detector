@@ -32,7 +32,7 @@ Add tests to `tests/test_patternhawk.py`. They drive the real window and the rea
 What `PatternHawkTestCase` gives you:
 
 - `make_window(areas=[...], default_hotkey="")` builds a window from data. `area(template(FIX.bull, "alt+b"))` builds one area; `both_directions()` is an area with a bullish `alt+b` and a bearish `alt+s` template.
-- `cycle(scene, scene, ...)` runs one capture cycle with one scene per area and returns the hotkeys sent. Scenes: `FIX.none`, `FIX.bull_scene`, `FIX.bear_scene`, `FIX.both_scene`.
+- `cycle(scene, scene, ...)` runs one capture cycle with one scene per area and returns the hotkeys sent. Scenes: `FIX.none`, `FIX.bull_scene`, `FIX.bear_scene`, `FIX.both_scene`. It marks capture as running first, because a check gives up when capture is stopped; a test that calls `_capture_and_detect_thread` itself must set `capture_in_progress = True`.
 - `status()`, `list_rows(area_index)`, `saved()` read the status label, a template list and the data file.
 
 ```python
