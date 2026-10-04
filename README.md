@@ -37,7 +37,7 @@ The result of the last check is drawn at the bottom of the Capture tab, with a b
 
 ### Hotkeys
 
-Write keys joined with `+`, for example `alt+b`, `ctrl+shift+a` or `f5`. Capitals and spaces do not matter: `Alt + B` is the same as `alt+b`.
+Write keys joined with `+`, for example `alt+b`, `ctrl+shift+a` or `f5`. Capitals and spaces do not matter: `Alt + B` is the same as `alt+b`. A capital letter does not add Shift; if the hotkey needs Shift, write it out, as in `alt+shift+b`.
 
 - A template with no hotkey of its own uses the **Default Hotkey** from the Settings tab.
 - PatternHawk refuses a key name it cannot press (a typo such as `atl+b`), so it never presses half a hotkey.

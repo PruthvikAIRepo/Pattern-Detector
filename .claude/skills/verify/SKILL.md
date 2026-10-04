@@ -25,7 +25,8 @@ Add tests to `tests/test_patternhawk.py`. They drive the real window and the rea
 | Key presses | `pyautogui.hotkey` and `_perform_hotkey_win32` append to `self.sent` |
 | Registry settings | `FakeSettings`, in memory |
 | `%USERPROFILE%\PatternHawk` | a temp folder per test |
-| Dialogs | warnings collected in `self.warnings` |
+| Message boxes | warnings collected in `self.warnings` (a real `QMessageBox` crashes offscreen Qt on Windows, so never let one open) |
+| Input dialogs | patched per test, or the real one driven by a timer as in `RealInputDialogTests` |
 | Log lines | collected in `self.logs` |
 
 What `PatternHawkTestCase` gives you:

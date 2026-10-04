@@ -87,6 +87,7 @@ Cases 2 to 4 are logged once while they last (`_last_block_reason`), not every c
 ## Hotkey strings
 
 - Compare and store hotkeys through `normalize_hotkey()`: lowercase, no spaces, modifiers first in the order ctrl, alt, shift, win.
+- The lowercasing changes what is sent: pyautogui adds Shift for a capital letter, so up to v1.6.0 the normal sender pressed `Alt+B` as Alt+Shift+B while the Win32 sender pressed Alt+B. Both now press Alt+B. A hotkey that needs Shift has to say `shift`.
 - `_key_problem(hotkey)` says why a hotkey cannot be pressed: a name pyautogui does not know on Windows, or in browser-compatible mode a key outside `WIN32_VK_CODES`.
 - Both senders skip a key they do not know and press the rest. An unchecked typo such as `atl+b` would type a bare `b` into the trading platform.
 - The check runs in the template hotkey prompt, Save Settings, Start Capture, Enable Schedule, and again right before firing. The last one matters: a schedule that was on at exit resumes at launch without passing through Start, and data files can be edited by hand.
@@ -119,6 +120,7 @@ Keys go to whichever window has focus, so the app tracks the last foreground win
 - Do not add `unittest` or `pydoc` to the spec's `excludes`. scipy imports them and the EXE dies at startup.
 - The spec builds with `optimize=2`, which strips `assert`. Never use `assert` for app logic.
 - Rendering the UI offscreen (`QT_QPA_PLATFORM=offscreen`) shows no text unless `QT_QPA_FONTDIR=C:/Windows/Fonts` is set.
+- A real `QMessageBox` crashes offscreen Qt on Windows with an access violation, with or without app code. Headless tests and scripts must replace `QMessageBox.warning`, `.information`, `.critical` and `.question` (the test base class does the first three). The real `QInputDialog` works offscreen; `RealInputDialogTests` drives it with a timer.
 - `os.path.expanduser('~')` follows `USERPROFILE`. Point it at a temp folder to launch the app or the EXE without touching real data.
 
 ## Workflow

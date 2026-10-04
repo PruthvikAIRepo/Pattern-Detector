@@ -511,6 +511,72 @@ class TemplateHotkeyUiTests(PatternHawkTestCase):
         self.assertEqual(self.list_rows(1), self.list_rows(0))
 
 
+class RealInputDialogTests(PatternHawkTestCase):
+    """The hotkey prompt through Qt's real input dialog, which the other tests replace.
+
+    Message boxes stay replaced: a real QMessageBox crashes offscreen Qt on Windows.
+    """
+
+    def play_user(self, *answers):
+        """Type each answer into the input dialog that opens and press OK.
+
+        Returns the (label, pre-filled text) of every hotkey prompt that was shown.
+        """
+        answers = list(answers)
+        shown = []
+
+        def respond():
+            dialog = app.activeModalWidget()
+            if not isinstance(dialog, ph.QInputDialog):
+                return
+            if dialog.inputMode() == ph.QInputDialog.TextInput:
+                shown.append((dialog.labelText(), dialog.textValue()))
+                if not answers:
+                    dialog.reject()  # an unexpected prompt must not hang the suite
+                    return
+                dialog.setTextValue(answers.pop(0))
+            dialog.accept()
+
+        timer = ph.QTimer()
+        timer.timeout.connect(respond)
+        timer.start(20)
+        self.addCleanup(timer.stop)
+        return shown
+
+    def test_edit_hotkey_through_the_real_prompt(self):
+        self.make_window(default_hotkey="alt+b", areas=[area(template(FIX.bull, "alt+b"))])
+        shown = self.play_user("atl+s", "Alt + S")
+        self.window.template_lists[0].setCurrentRow(0)
+        self.window.editTemplateHotkey(0)
+
+        label = "Enter hotkey (e.g., alt+b):\nLeave blank to use the Default Hotkey (alt+b)."
+        self.assertEqual(shown, [(label, "alt+b"), (label, "atl+s")])
+        self.assertEqual(self.warnings, ["'atl+s' cannot be used: unknown key atl.\n"
+                                         "Use key names like alt+b or ctrl+shift+a."])
+        self.assertEqual(self.list_rows(0), ["1. bull.png (Confidence: 0.8, Hotkey: alt+s)"])
+
+    def test_add_template_through_the_real_prompts(self):
+        self.make_window(default_hotkey="alt+b", areas=[])
+        shown = self.play_user("")  # blank: use the Default Hotkey
+        with mock.patch.object(ph.QFileDialog, "getOpenFileName",
+                               lambda *a, **kw: (FIX.bear, "")):
+            self.window.addTemplate(0)
+        self.assertEqual(len(shown), 1)
+        self.assertEqual(self.window.areas[0]["templates"],
+                         [{"path": FIX.bear, "similarity": 0.8, "hotkey": ""}])
+        self.assertEqual(self.list_rows(0),
+                         ["1. bear.png (Confidence: 0.8, Hotkey: alt+b (default))"])
+
+    def test_double_click_opens_the_hotkey_prompt(self):
+        self.make_window(areas=[both_directions()])
+        shown = self.play_user("f5")
+        rows = self.window.template_lists[0]
+        rows.setCurrentRow(1)
+        rows.itemDoubleClicked.emit(rows.item(1))
+        self.assertEqual([text for _, text in shown], ["alt+s"])
+        self.assertEqual(self.window.areas[0]["templates"][1]["hotkey"], "f5")
+
+
 class PersistenceTests(PatternHawkTestCase):
 
     def test_data_saved_before_this_feature_keeps_working(self):
@@ -665,9 +731,9 @@ class CaptureControlTests(PatternHawkTestCase):
         # Regression: every Pause left a timer behind that restarted capture after Stop.
         self.window.start_capture()
         self.window.pause_capture()
-        self.pump(1.2)
+        self.pump(1.5)
         self.window.pause_capture()
-        self.pump(1.2)
+        self.pump(1.5)
         self.assertEqual(self.resumes, 2)
         self.window.stop_capture()
         self.pump(1.4)
