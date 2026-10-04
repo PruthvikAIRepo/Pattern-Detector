@@ -788,6 +788,15 @@ class PersistenceTests(PatternHawkTestCase):
         self.assertEqual(self.saved()["global_hotkey"], "alt+x")
         self.assertFalse(os.path.exists(self.data_file + ".tmp"))
 
+    def test_save_still_works_when_the_swap_is_blocked(self):
+        # Another program can hold the data file open in a way that stops it being replaced.
+        self.make_window(areas=[both_directions()])
+        self.window.global_hotkey = "alt+x"
+        with mock.patch.object(ph.os, "replace", side_effect=PermissionError("file in use")):
+            self.window.saveData()
+        self.assertEqual(self.saved()["global_hotkey"], "alt+x")
+        self.assertEqual(self.logs, [])
+
     def test_hotkey_field_with_a_number_does_not_crash_the_launch(self):
         hand_edited = area(template(FIX.bull))
         hand_edited["templates"][0]["hotkey"] = 5
@@ -980,6 +989,25 @@ class CaptureControlTests(PatternHawkTestCase):
         self.window.delay_timer.setTime(ph.QTime(0, 0, 1))
         self.window.start_capture()
         self.window.schedule_enable_checkbox.setChecked(True)  # no block has an active area
+        self.pump(1.5)
+        self.assert_not_capturing()
+
+    def test_closing_the_window_stops_every_timer(self):
+        self.window.start_capture()
+        self.window.pause_capture()
+        self.window.resume_capture()
+        self.assertTrue(self.window.timer.isActive())
+        self.assertTrue(self.window.progress_timer.isActive())
+        self.window.close()
+        self.assertFalse(self.window.capture_in_progress)
+        for name in ("timer", "progress_timer", "pause_timer", "countdown_timer",
+                     "schedule_timer", "_fg_tracker"):
+            self.assertFalse(getattr(self.window, name).isActive(), name)
+
+    def test_closing_the_window_cancels_a_delayed_start(self):
+        self.window.delay_timer.setTime(ph.QTime(0, 0, 1))
+        self.window.start_capture()
+        self.window.close()
         self.pump(1.5)
         self.assert_not_capturing()
 

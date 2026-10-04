@@ -889,7 +889,13 @@ class ScreenCapturePatternDetector(QMainWindow):
             temp_file = self.data_file + '.tmp'
             with open(temp_file, 'w') as f:
                 json.dump(data, f, indent=2)
-            os.replace(temp_file, self.data_file)
+            try:
+                os.replace(temp_file, self.data_file)
+            except OSError:
+                # Another program holds the data file open in a way that blocks the swap.
+                # Write it in place, as earlier versions always did, rather than not save.
+                with open(self.data_file, 'w') as f:
+                    json.dump(data, f, indent=2)
         except Exception as e:
             error_msg = f"saveData error: {str(e)}\n{traceback.format_exc()}"
             self._log_error_to_file(error_msg)
