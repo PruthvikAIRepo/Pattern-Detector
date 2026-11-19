@@ -121,6 +121,7 @@ Cases 2 to 4 are logged once while they last (`_last_block_reason`), not every c
 Keys go to whichever window has focus, so the app tracks the last foreground window of another application (`_track_foreground_window`, every 500 ms) and `perform_hotkey` refocuses it before sending. Anything that pulls PatternHawk to the front at fire time breaks delivery.
 
 - Windows of our own process never become the target (`_is_own_window`). A dialog or the area selector would otherwise replace the trading platform as the target and be gone by the time a hotkey fires.
+- The target is the window handle, never its title. The Target Window label shows the full live title (browser titles are long and change constantly, e.g. an alert count in brackets), and the log gets one line per change of window, not per change of title. Tests stop `_fg_tracker` in `make_window`; a test of the tracker calls `_track_foreground_window` itself with `GetForegroundWindow` patched.
 - The hover highlight overlay must keep `WA_ShowWithoutActivating` (it must not take focus) and `WA_TransparentForMouseEvents` (it sits under the cursor and would otherwise swallow the hover and flicker).
 - The "Select Template Set" dropdowns are `NoWheelComboBox`. A plain combo box changes on a wheel turn while the page is scrolled, which loaded another set into the area with no question asked.
 

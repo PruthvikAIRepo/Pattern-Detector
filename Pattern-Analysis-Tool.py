@@ -27,7 +27,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 APP_NAME = "PatternHawk"
-APP_VERSION = "1.7.1"  # shown in the title bar; bump with every release
+APP_VERSION = "1.7.2"  # shown in the title bar; bump with every release
 NUM_AREAS = 5
 SCHEDULE_BLOCK_MINUTES = 10
 SCHEDULE_BLOCKS = (24 * 60) // SCHEDULE_BLOCK_MINUTES  # 144
@@ -426,6 +426,10 @@ class ScreenCapturePatternDetector(QMainWindow):
 
         self.target_window_label = QLabel("Click on your target app — it will be tracked automatically")
         self.target_window_label.setStyleSheet("color: #999999;")
+        # Browser titles run long ("(20) Layout - WealthCharts - Google Chrome"). Show all
+        # of it: a cut-off title cannot tell two similar windows apart.
+        self.target_window_label.setWordWrap(True)
+        self.target_window_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         capture_settings_layout.addRow("Target Window:", self.target_window_label)
 
         self.pause_duration_input = QSpinBox()
@@ -776,18 +780,33 @@ class ScreenCapturePatternDetector(QMainWindow):
     # ──────────────────────────────────────────────
 
     def _track_foreground_window(self):
-        """Continuously track the foreground window. When user focuses another app, remember it."""
+        """Remember the window in front whenever it belongs to another application.
+
+        The target is the window handle, never its title. The label follows the live
+        title (a browser rewrites it constantly, e.g. an alert count in brackets), but
+        the log records only a change of window, or it would fill with title changes.
+        """
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if not hwnd or hwnd == self._my_hwnd or self._is_own_window(hwnd):
+            return
+        changed = hwnd != self.target_window_handle
+        self.target_window_handle = hwnd
+        title = self._window_title(hwnd) or "(window with no title)"
+        if changed or title != self.target_window_label.text():
+            self.target_window_label.setText(title)
+            self.target_window_label.setToolTip(title)
+            self.target_window_label.setStyleSheet("color: #00cc00;")
+        if changed:
+            self.log_message(f"Target window is now: {title}")
+
+    def _window_title(self, hwnd):
         user32 = ctypes.windll.user32
-        hwnd = user32.GetForegroundWindow()
-        if hwnd and hwnd != self._my_hwnd and not self._is_own_window(hwnd):
-            self.target_window_handle = hwnd
-            length = user32.GetWindowTextLengthW(hwnd)
-            if length > 0:
-                buf = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buf, length + 1)
-                title = buf.value[:40]
-                self.target_window_label.setText(title)
-                self.target_window_label.setStyleSheet("color: #00cc00;")
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return ""
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        return buf.value
 
     def _is_own_window(self, hwnd):
         """True for any window of this process: dialogs, the area selector, overlays.

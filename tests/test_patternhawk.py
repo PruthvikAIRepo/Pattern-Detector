@@ -152,6 +152,9 @@ class PatternHawkTestCase(unittest.TestCase):
         self.addCleanup(window.close)
         self.assertTrue(window.data_file.startswith(self.profile), "test must not use the real profile")
 
+        # The tracker reads the real desktop and logs every target change. A suite that
+        # pumps the event loop must not depend on what is in front of the user's screen.
+        window._fg_tracker.stop()
         window._focus_target_window = lambda: False
         window._perform_hotkey_win32 = lambda hotkey, delay=0.1: self.sent.append("win32:" + hotkey)
         window.capture_screen = lambda region, i: self.scenes[i]
@@ -998,6 +1001,7 @@ class CaptureControlTests(PatternHawkTestCase):
         self.window.resume_capture()
         self.assertTrue(self.window.timer.isActive())
         self.assertTrue(self.window.progress_timer.isActive())
+        self.window._fg_tracker.start(500)  # make_window stops it; closing must too
         self.window.close()
         self.assertFalse(self.window.capture_in_progress)
         for name in ("timer", "progress_timer", "pause_timer", "countdown_timer",
@@ -1118,6 +1122,66 @@ class ScheduleControlTests(PatternHawkTestCase):
 
 class TargetWindowTests(PatternHawkTestCase):
     """Hotkeys go to the last window the user had in front that is not PatternHawk's."""
+
+    def _real_window(self, title):
+        """A real (never shown) window of this process with the given title."""
+        user32 = ctypes.WinDLL("user32")
+        user32.CreateWindowExW.restype = ctypes.c_void_p
+        user32.DestroyWindow.argtypes = [ctypes.c_void_p]
+        hwnd = user32.CreateWindowExW(0, "STATIC", title, 0, 0, 0, 0, 0,
+                                      None, None, None, None)
+        self.assertTrue(hwnd)
+        self.addCleanup(user32.DestroyWindow, hwnd)
+        return hwnd
+
+    def _in_front(self, hwnd):
+        """Pretend `hwnd` is another application's window and is in front."""
+        self.window._is_own_window = lambda h: False
+        return mock.patch.object(ph.ctypes.windll.user32, "GetForegroundWindow", lambda: hwnd)
+
+    def test_target_label_shows_the_full_title(self):
+        w = self.make_window(areas=[])
+        title = ("(20) PHNov26 - WealthCharts - Google Chrome - a browser title "
+                 "far longer than the forty characters the label used to keep")
+        hwnd = self._real_window(title)
+        with self._in_front(hwnd):
+            w._track_foreground_window()
+        self.assertEqual(w.target_window_handle, hwnd)
+        self.assertEqual(w.target_window_label.text(), title)
+        self.assertEqual(w.target_window_label.toolTip(), title)
+        self.assertEqual(self.logs, [f"Target window is now: {title}"])
+
+    def test_target_change_is_logged_once_and_title_changes_are_not(self):
+        w = self.make_window(areas=[])
+        hwnd = self._real_window("(20) PHNov26 - WealthCharts - Google Chrome")
+        with self._in_front(hwnd):
+            w._track_foreground_window()
+            w._track_foreground_window()
+            self.assertEqual(len(self.logs), 1)
+
+            # The page bumps its alert count: the label follows, the log stays quiet
+            user32 = ctypes.WinDLL("user32")
+            user32.SetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+            user32.SetWindowTextW(hwnd, "(21) PHNov26 - WealthCharts - Google Chrome")
+            w._track_foreground_window()
+            self.assertEqual(w.target_window_label.text(),
+                             "(21) PHNov26 - WealthCharts - Google Chrome")
+            self.assertEqual(len(self.logs), 1)
+
+        other = self._real_window("NinjaTrader")
+        with self._in_front(other):
+            w._track_foreground_window()
+        self.assertEqual(w.target_window_handle, other)
+        self.assertEqual(self.logs, ["Target window is now: (20) PHNov26 - WealthCharts - Google Chrome",
+                                     "Target window is now: NinjaTrader"])
+
+    def test_untitled_target_window_is_named_as_such(self):
+        w = self.make_window(areas=[])
+        hwnd = self._real_window("")
+        with self._in_front(hwnd):
+            w._track_foreground_window()
+        self.assertEqual(w.target_window_label.text(), "(window with no title)")
+        self.assertEqual(self.logs, ["Target window is now: (window with no title)"])
 
     def test_own_dialogs_never_become_the_target(self):
         w = self.make_window(areas=[])
