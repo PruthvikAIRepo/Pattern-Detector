@@ -1141,7 +1141,7 @@ class TargetWindowTests(PatternHawkTestCase):
 
     def test_target_label_shows_the_full_title(self):
         w = self.make_window(areas=[])
-        title = ("(20) PHNov26 - WealthCharts - Google Chrome - a browser title "
+        title = ("(20) ES Chart - WealthCharts - Google Chrome - a browser title "
                  "far longer than the forty characters the label used to keep")
         hwnd = self._real_window(title)
         with self._in_front(hwnd):
@@ -1153,7 +1153,7 @@ class TargetWindowTests(PatternHawkTestCase):
 
     def test_target_change_is_logged_once_and_title_changes_are_not(self):
         w = self.make_window(areas=[])
-        hwnd = self._real_window("(20) PHNov26 - WealthCharts - Google Chrome")
+        hwnd = self._real_window("(20) ES Chart - WealthCharts - Google Chrome")
         with self._in_front(hwnd):
             w._track_foreground_window()
             w._track_foreground_window()
@@ -1162,17 +1162,17 @@ class TargetWindowTests(PatternHawkTestCase):
             # The page bumps its alert count: the label follows, the log stays quiet
             user32 = ctypes.WinDLL("user32")
             user32.SetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
-            user32.SetWindowTextW(hwnd, "(21) PHNov26 - WealthCharts - Google Chrome")
+            user32.SetWindowTextW(hwnd, "(21) ES Chart - WealthCharts - Google Chrome")
             w._track_foreground_window()
             self.assertEqual(w.target_window_label.text(),
-                             "(21) PHNov26 - WealthCharts - Google Chrome")
+                             "(21) ES Chart - WealthCharts - Google Chrome")
             self.assertEqual(len(self.logs), 1)
 
         other = self._real_window("NinjaTrader")
         with self._in_front(other):
             w._track_foreground_window()
         self.assertEqual(w.target_window_handle, other)
-        self.assertEqual(self.logs, ["Target window is now: (20) PHNov26 - WealthCharts - Google Chrome",
+        self.assertEqual(self.logs, ["Target window is now: (20) ES Chart - WealthCharts - Google Chrome",
                                      "Target window is now: NinjaTrader"])
 
     def test_untitled_target_window_is_named_as_such(self):
