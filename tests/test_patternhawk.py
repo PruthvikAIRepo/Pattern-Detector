@@ -1120,17 +1120,67 @@ class ScheduleControlTests(PatternHawkTestCase):
                          [False] * ph.NUM_AREAS)
 
 
+_WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_void_p, ctypes.c_uint,
+                              ctypes.c_size_t, ctypes.c_ssize_t)
+
+
+class _WNDCLASSEXW(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("style", ctypes.c_uint), ("lpfnWndProc", _WNDPROC),
+                ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                ("hInstance", ctypes.c_void_p), ("hIcon", ctypes.c_void_p),
+                ("hCursor", ctypes.c_void_p), ("hbrBackground", ctypes.c_void_p),
+                ("lpszMenuName", ctypes.c_wchar_p), ("lpszClassName", ctypes.c_wchar_p),
+                ("hIconSm", ctypes.c_void_p)]
+
+
+_registered_window_classes = {}  # name -> WNDCLASSEXW, kept alive with its window procedure
+
+
+def register_window_class(name):
+    """Register `name` as a window class of this process, once.
+
+    A class name is only looked up inside the process that registered it, so a test
+    can own a window called "ForegroundStaging" without touching the real shell.
+    """
+    if name in _registered_window_classes:
+        return
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32")
+    kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+    kernel32.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
+    user32.DefWindowProcW.restype = ctypes.c_ssize_t
+    user32.DefWindowProcW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
+    user32.RegisterClassExW.argtypes = [ctypes.POINTER(_WNDCLASSEXW)]
+    wc = _WNDCLASSEXW()
+    wc.cbSize = ctypes.sizeof(_WNDCLASSEXW)
+    wc.lpfnWndProc = _WNDPROC(lambda h, m, wp, lp: user32.DefWindowProcW(h, m, wp, lp))
+    wc.hInstance = kernel32.GetModuleHandleW(None)
+    wc.lpszClassName = name
+    if not user32.RegisterClassExW(ctypes.byref(wc)):
+        raise OSError(f"RegisterClassExW({name!r}) failed: {ctypes.get_last_error()}")
+    _registered_window_classes[name] = wc
+
+
 class TargetWindowTests(PatternHawkTestCase):
     """Hotkeys go to the last window the user had in front that is not PatternHawk's."""
 
-    def _real_window(self, title):
-        """A real (never shown) window of this process with the given title."""
+    def _real_window(self, title, window_class="STATIC"):
+        """A real (never shown) window of this process with the given title and class."""
+        if window_class != "STATIC":
+            register_window_class(window_class)
         user32 = ctypes.WinDLL("user32")
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+        kernel32.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
         user32.CreateWindowExW.restype = ctypes.c_void_p
+        user32.CreateWindowExW.argtypes = [ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_wchar_p,
+                                           ctypes.c_uint, ctypes.c_int, ctypes.c_int,
+                                           ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
+                                           ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
         user32.DestroyWindow.argtypes = [ctypes.c_void_p]
-        hwnd = user32.CreateWindowExW(0, "STATIC", title, 0, 0, 0, 0, 0,
-                                      None, None, None, None)
-        self.assertTrue(hwnd)
+        hwnd = user32.CreateWindowExW(0, window_class, title, 0, 0, 0, 0, 0,
+                                      None, None, kernel32.GetModuleHandleW(None), None)
+        self.assertTrue(hwnd, window_class)
         self.addCleanup(user32.DestroyWindow, hwnd)
         return hwnd
 
@@ -1182,6 +1232,43 @@ class TargetWindowTests(PatternHawkTestCase):
             w._track_foreground_window()
         self.assertEqual(w.target_window_label.text(), "(window with no title)")
         self.assertEqual(self.logs, ["Target window is now: (window with no title)"])
+
+    def test_shell_windows_never_become_the_target(self):
+        w = self.make_window(areas=[])
+        chrome = self._real_window("ES Chart - WealthCharts - Google Chrome")
+        self.assertEqual(w._window_class(chrome), "Static")  # the class check reads real windows
+        with self._in_front(chrome):
+            w._track_foreground_window()
+
+        shell_windows = [("ForegroundStaging", ""),
+                         ("XamlExplorerHostIslandWindow", "Task Switching"),
+                         ("MultitaskingViewFrame", "Task Switching"),
+                         ("Shell_TrayWnd", ""),
+                         ("Progman", "Program Manager"),
+                         ("Windows.UI.Core.CoreWindow", "Start")]
+        for window_class, title in shell_windows:
+            shell = self._real_window(title, window_class)
+            self.assertEqual(w._window_class(shell), window_class)
+            with self._in_front(shell):
+                w._track_foreground_window()
+            self.assertEqual(w.target_window_handle, chrome, window_class)
+        self.assertEqual(w.target_window_label.text(), "ES Chart - WealthCharts - Google Chrome")
+        self.assertEqual(self.logs, ["Target window is now: ES Chart - WealthCharts - Google Chrome"])
+
+    def test_alt_tab_to_patternhawk_keeps_the_trading_platform_as_the_target(self):
+        """Trading platform -> Alt+Tab overlay -> PatternHawk: the target must survive."""
+        w = self.make_window(areas=[])
+        platform = self._real_window("NinjaTrader")
+        overlay = self._real_window("Task Switching", "XamlExplorerHostIslandWindow")
+        with self._in_front(platform):
+            w._track_foreground_window()
+        with self._in_front(overlay):
+            w._track_foreground_window()
+        with mock.patch.object(ph.ctypes.windll.user32, "GetForegroundWindow", lambda: w._my_hwnd):
+            w._track_foreground_window()
+        self.assertEqual(w.target_window_handle, platform)
+        self.assertEqual(w.target_window_label.text(), "NinjaTrader")
+        self.assertEqual(self.logs, ["Target window is now: NinjaTrader"])
 
     def test_own_dialogs_never_become_the_target(self):
         w = self.make_window(areas=[])

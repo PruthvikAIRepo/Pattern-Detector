@@ -27,7 +27,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 APP_NAME = "PatternHawk"
-APP_VERSION = "1.7.2"  # shown in the title bar; bump with every release
+APP_VERSION = "1.7.3"  # shown in the title bar; bump with every release
 NUM_AREAS = 5
 SCHEDULE_BLOCK_MINUTES = 10
 SCHEDULE_BLOCKS = (24 * 60) // SCHEDULE_BLOCK_MINUTES  # 144
@@ -56,6 +56,25 @@ WIN32_VK_CODES = {
 }
 # VK codes for A-Z are 0x41-0x5A
 WIN32_VK_CODES.update({chr(c): c - 32 for c in range(ord('a'), ord('z') + 1)})
+
+# Window classes of Windows' own shell. One of them is in front for a moment during a
+# switch (Alt+Tab, Task View) or a click on the taskbar, Start or the desktop. None is
+# ever a place to send a hotkey, so the tracker keeps the previous target while one is
+# in front. Without this, Alt+Tab from the trading platform to PatternHawk left the
+# hidden Alt+Tab overlay as the target and the next hotkey reached nothing.
+SHELL_WINDOW_CLASSES = frozenset({
+    'ForegroundStaging',               # blank window shown for an instant while switching
+    'XamlExplorerHostIslandWindow',    # Alt+Tab / Task View overlay on Windows 11 ("Task Switching")
+    'MultitaskingViewFrame',           # the same overlay on Windows 10
+    'Shell_TrayWnd',                   # taskbar
+    'Shell_SecondaryTrayWnd',          # taskbar on other monitors
+    'NotifyIconOverflowWindow',        # tray overflow on Windows 10
+    'TopLevelWindowForOverflowXamlIsland',  # tray overflow on Windows 11
+    'Progman',                         # desktop
+    'WorkerW',                         # desktop (wallpaper host)
+    'Windows.UI.Core.CoreWindow',      # Start, Search, notification centre, touch keyboard
+    'Shell_InputSwitchTopLevelWindow',  # Win+Space language switcher
+})
 
 
 def normalize_hotkey(text):
@@ -785,9 +804,14 @@ class ScreenCapturePatternDetector(QMainWindow):
         The target is the window handle, never its title. The label follows the live
         title (a browser rewrites it constantly, e.g. an alert count in brackets), but
         the log records only a change of window, or it would fill with title changes.
+
+        Windows' own shell windows (SHELL_WINDOW_CLASSES) are skipped like our own: the
+        target stays where it was while the Alt+Tab overlay or the taskbar is in front.
         """
         hwnd = ctypes.windll.user32.GetForegroundWindow()
         if not hwnd or hwnd == self._my_hwnd or self._is_own_window(hwnd):
+            return
+        if self._window_class(hwnd) in SHELL_WINDOW_CLASSES:
             return
         changed = hwnd != self.target_window_handle
         self.target_window_handle = hwnd
@@ -806,6 +830,12 @@ class ScreenCapturePatternDetector(QMainWindow):
             return ""
         buf = ctypes.create_unicode_buffer(length + 1)
         user32.GetWindowTextW(hwnd, buf, length + 1)
+        return buf.value
+
+    def _window_class(self, hwnd):
+        buf = ctypes.create_unicode_buffer(256)  # class names are at most 256 characters
+        if not ctypes.windll.user32.GetClassNameW(hwnd, buf, 256):
+            return ""
         return buf.value
 
     def _is_own_window(self, hwnd):
